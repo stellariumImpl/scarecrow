@@ -32,7 +32,14 @@ from scarecrow.context import build_system_prompt
 from scarecrow.skills import ensure_builtin_skills
 from scarecrow.tools import run_python, reset_namespace
 
-from scarecrow.router import IntentRouter
+from scarecrow.router import IntentRouter, RouteDecision
+
+def _route_user_input(user_input: str, cfg: LLMConfig) -> RouteDecision:
+    """对用户输入做结构化路由。"""
+
+    model = load_chat_model_from_config(cfg)
+    router = IntentRouter(model)
+    return router.route(user_input)
 
 
 def _debug_route(text: str, agent, workspace: Path) -> None:
@@ -127,36 +134,59 @@ def start_repl(workspace: Path) -> None:
 # 对话处理 + tool call 可视化
 # ---------------------------------------------------------------------------
 
-
 def _handle_chat(user_input: str, agent, messages: list, workspace: Path):
-    """处理一轮对话,流式打印 tool call 过程"""
-    if agent is None:
-        cfg = load_config()
-        if cfg is None:
-            console.print("[yellow]请先运行 /config 配置 LLM[/yellow]")
-            return agent, messages
-        try:
-            with console.status("初始化 Agent..."):
-                agent = _build_agent(cfg, workspace)  # ← 这里加 workspace
-        except Exception as e:
-            console.print(f"[red]Agent 初始化失败: {e}[/red]")
-            return agent, messages
+    """处理一轮对话，先 route，再按需构建上下文。"""
+
+    cfg = load_config()
+    if cfg is None:
+        console.print("[yellow]请先运行 /config 配置 LLM[/yellow]")
+        return agent, messages
+
+    try:
+        with console.status("Routing..."):
+            decision = _route_user_input(user_input, cfg)
+    except Exception as e:
+        console.print(f"[red]Router 出错: {e}[/red]")
+        return agent, messages
+
+    if decision.needs_clarification and decision.clarification_question:
+        console.print(f"[yellow]{decision.clarification_question}[/yellow]")
+        return agent, messages
+
+    selected_skills = decision.required_skills
+
+    console.print(
+        f"[dim]route={decision.intent}, skills={decision.required_skills}, confidence={decision.confidence:.2f}[/dim]"
+    )
+
+    try:
+        with console.status("初始化 Agent..."):
+            agent = _build_agent(
+                cfg=cfg,
+                workspace=workspace,
+                selected_skills=selected_skills,
+                include_all_skills=False,
+            )
+    except Exception as e:
+        console.print(f"[red]Agent 初始化失败: {e}[/red]")
+        return agent, messages
 
     messages.append({"role": "user", "content": user_input})
 
     try:
-        # 用 stream 模式取每一步更新，便于实时打印 tool call
         result_messages = list(messages)
         printed_tool_calls: set[str] = set()
 
         for chunk in agent.stream({"messages": messages}, stream_mode="values"):
             new_messages = chunk.get("messages", [])
-            # 只处理新增的消息
-            for msg in new_messages[len(result_messages) :]:
+
+            for msg in new_messages[len(result_messages):]:
                 _render_message(msg, printed_tool_calls)
+
             result_messages = new_messages
 
         messages = result_messages
+
     except Exception as e:
         messages.pop()
         console.print(f"[red]Agent 出错: {e}[/red]")
@@ -262,8 +292,14 @@ def _print_tool_args(args: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_agent(cfg: LLMConfig, workspace: Path):
-    """按配置和工作区构建 Agent"""
+def _build_agent(
+    cfg: LLMConfig,
+    workspace: Path,
+    selected_skills: list[str] | None = None,
+    include_all_skills: bool = False,
+):
+    """按配置、工作区和选中 skills 构建 Agent。"""
+
     model = load_chat_model_from_config(cfg)
 
     return create_agent(
@@ -271,6 +307,9 @@ def _build_agent(cfg: LLMConfig, workspace: Path):
         tools=[run_python],
         system_prompt=build_system_prompt(
             workspace=workspace,
+            selected_skills=selected_skills,
+            include_all_skills=include_all_skills,
+            include_skill_index=False,
             skills_dir=SKILLS_DIR,
         ),
     )
