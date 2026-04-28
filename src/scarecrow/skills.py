@@ -24,12 +24,19 @@ def load_skill_blocks(skills_dir: Path) -> list[str]:
     return blocks
 
 
-def build_system_prompt(skills_dir: Path) -> str:
-    """组装完整 system prompt：基础人设 + Skills 清单"""
+def build_system_prompt(skills_dir: Path, workspace: Path | None = None) -> str:
+    """组装完整 system prompt:基础人设 + 工作区简报 + Skills 清单"""
+    parts: list[str] = [BASE_PROMPT]
+
+    if workspace is not None:
+        from scarecrow.workspace import workspace_brief
+        parts.append(workspace_brief(workspace))
+
     blocks = load_skill_blocks(skills_dir)
-    if not blocks:
-        return BASE_PROMPT
-    return BASE_PROMPT + "\n\n--- 可用能力 ---\n\n" + "\n\n".join(blocks)
+    if blocks:
+        parts.append("--- 可用能力 ---\n\n" + "\n\n".join(blocks))
+
+    return "\n\n".join(parts)
 
 
 _BUILTIN_RUN_PYTHON_SKILL = """---

@@ -91,15 +91,15 @@ def start_repl(workspace: Path) -> None:
             reset_namespace()
             console.print("[dim]已清空对话历史与 Python 命名空间[/dim]")
         else:
-            agent, messages = _handle_chat(user_input, agent, messages)
+            agent, messages = _handle_chat(user_input, agent, messages, workspace)
 
 
 # ---------------------------------------------------------------------------
 # 对话处理 + tool call 可视化
 # ---------------------------------------------------------------------------
 
-def _handle_chat(user_input: str, agent, messages: list):
-    """处理一轮对话，流式打印 tool call 过程"""
+def _handle_chat(user_input: str, agent, messages: list, workspace: Path):
+    """处理一轮对话,流式打印 tool call 过程"""
     if agent is None:
         cfg = load_config()
         if cfg is None:
@@ -107,7 +107,7 @@ def _handle_chat(user_input: str, agent, messages: list):
             return agent, messages
         try:
             with console.status("初始化 Agent..."):
-                agent = _build_agent(cfg)
+                agent = _build_agent(cfg, workspace)  # ← 这里加 workspace
         except Exception as e:
             console.print(f"[red]Agent 初始化失败: {e}[/red]")
             return agent, messages
@@ -134,6 +134,47 @@ def _handle_chat(user_input: str, agent, messages: list):
     return agent, messages
 
 
+def _render_tool_result(content: str) -> None:
+    """渲染工具执行结果:错误显示关键行、成功输出显示前几行预览"""
+    if not content:
+        console.print("[green]✓[/green] [dim](无输出)[/dim]")
+        return
+
+    size = len(content)
+    lines = content.splitlines()
+
+    # 1. 错误优先识别:展示最有用的尾部
+    is_error = (
+        content.startswith("执行错误:")
+        or "Traceback" in content[:200]
+        or any(k in content for k in ("Error:", "Exception:"))
+    )
+    if is_error:
+        # 错误的关键信息在最后一行(异常类型 + 消息)
+        # 取最后一个非空行,如有 ":" 通常就是 ErrorType: message
+        last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+        console.print(f"[red]✗[/red] [dim]{_truncate(last, 120)}[/dim]")
+        return
+
+    # 2. 短输出(单行 + 不超 200 字符)直接显示
+    if size <= 200 and len(lines) <= 1:
+        console.print(f"[green]✓[/green] [dim]{content.strip()}[/dim]")
+        return
+
+    # 3. 长输出:显示前 5 行预览 + 总字符数
+    preview_lines = lines[:5]
+    preview = "\n".join(f"  [dim]{_truncate(ln, 100)}[/dim]" for ln in preview_lines)
+    more = f"\n  [dim]... ({len(lines) - 5} 行未显示, 共 {size} 字符)[/dim]" if len(lines) > 5 else ""
+    console.print(f"[green]✓[/green]\n{preview}{more}")
+
+
+def _truncate(s: str, max_len: int) -> str:
+    """单行截断:超过 max_len 用 ... 收尾"""
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 3] + "..."
+
+
 def _render_message(msg, printed_tool_calls: set) -> None:
     """根据消息类型渲染：tool call / tool result / 最终回答"""
     # 1. AI 决定调用工具
@@ -152,12 +193,7 @@ def _render_message(msg, printed_tool_calls: set) -> None:
     # 2. 工具执行结果
     if isinstance(msg, ToolMessage):
         content = str(msg.content) if msg.content else ""
-        size = len(content)
-        # 简短输出直接显示，长输出只显示字符数
-        if size <= 200 and "\n" not in content:
-            console.print(f"[green]✓[/green] [dim]{content}[/dim]")
-        else:
-            console.print(f"[green]✓[/green] [dim](输出 {size} 字符)[/dim]")
+        _render_tool_result(content)
         return
 
     # 3. AI 最终回答（无 tool_calls 的 AIMessage）
@@ -191,8 +227,8 @@ def _print_tool_args(args: dict) -> None:
 # Agent 构建
 # ---------------------------------------------------------------------------
 
-def _build_agent(cfg: LLMConfig):
-    """按配置构建 Agent。system prompt 来自 ~/.scarecrow/skills/"""
+def _build_agent(cfg: LLMConfig, workspace: Path):
+    """按配置和工作区构建 Agent"""
     model_id = f"{cfg.provider}:{cfg.model}"
     model_kwargs: dict = {"temperature": 0}
     if cfg.provider != "ollama":
@@ -203,7 +239,7 @@ def _build_agent(cfg: LLMConfig):
     return create_agent(
         model=model,
         tools=[run_python],
-        system_prompt=build_system_prompt(SKILLS_DIR),
+        system_prompt=build_system_prompt(SKILLS_DIR, workspace),
     )
 
 
