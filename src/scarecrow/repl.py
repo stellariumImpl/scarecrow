@@ -5,7 +5,7 @@
 from pathlib import Path
 
 from langchain.agents import create_agent
-from langchain.chat_models import init_chat_model
+from scarecrow.llm.loader import load_chat_model_from_config
 from langchain_core.messages import AIMessage, ToolMessage
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
@@ -30,7 +30,6 @@ from scarecrow.config import (
 from scarecrow.langsmith_setup import apply_langsmith_env
 from scarecrow.skills import build_system_prompt, ensure_builtin_skills
 from scarecrow.tools import run_python, reset_namespace
-
 
 console = Console()
 
@@ -98,6 +97,7 @@ def start_repl(workspace: Path) -> None:
 # 对话处理 + tool call 可视化
 # ---------------------------------------------------------------------------
 
+
 def _handle_chat(user_input: str, agent, messages: list, workspace: Path):
     """处理一轮对话,流式打印 tool call 过程"""
     if agent is None:
@@ -122,7 +122,7 @@ def _handle_chat(user_input: str, agent, messages: list, workspace: Path):
         for chunk in agent.stream({"messages": messages}, stream_mode="values"):
             new_messages = chunk.get("messages", [])
             # 只处理新增的消息
-            for msg in new_messages[len(result_messages):]:
+            for msg in new_messages[len(result_messages) :]:
                 _render_message(msg, printed_tool_calls)
             result_messages = new_messages
 
@@ -164,7 +164,11 @@ def _render_tool_result(content: str) -> None:
     # 3. 长输出:显示前 5 行预览 + 总字符数
     preview_lines = lines[:5]
     preview = "\n".join(f"  [dim]{_truncate(ln, 100)}[/dim]" for ln in preview_lines)
-    more = f"\n  [dim]... ({len(lines) - 5} 行未显示, 共 {size} 字符)[/dim]" if len(lines) > 5 else ""
+    more = (
+        f"\n  [dim]... ({len(lines) - 5} 行未显示, 共 {size} 字符)[/dim]"
+        if len(lines) > 5
+        else ""
+    )
     console.print(f"[green]✓[/green]\n{preview}{more}")
 
 
@@ -227,14 +231,10 @@ def _print_tool_args(args: dict) -> None:
 # Agent 构建
 # ---------------------------------------------------------------------------
 
+
 def _build_agent(cfg: LLMConfig, workspace: Path):
     """按配置和工作区构建 Agent"""
-    model_id = f"{cfg.provider}:{cfg.model}"
-    model_kwargs: dict = {"temperature": 0}
-    if cfg.provider != "ollama":
-        model_kwargs["api_key"] = cfg.api_key
-
-    model = init_chat_model(model_id, **model_kwargs)
+    model = load_chat_model_from_config(cfg)
 
     return create_agent(
         model=model,
@@ -246,6 +246,7 @@ def _build_agent(cfg: LLMConfig, workspace: Path):
 # ---------------------------------------------------------------------------
 # 帮助
 # ---------------------------------------------------------------------------
+
 
 def _show_help() -> None:
     console.print("[bold]可用命令：[/bold]")
@@ -260,6 +261,7 @@ def _show_help() -> None:
 # ---------------------------------------------------------------------------
 # /config 流程（不变，照旧）
 # ---------------------------------------------------------------------------
+
 
 def _do_config(session: PromptSession) -> None:
     current = load_config()
@@ -293,6 +295,7 @@ def _do_config(session: PromptSession) -> None:
 # ---------------------------------------------------------------------------
 # /langsmith 流程
 # ---------------------------------------------------------------------------
+
 
 def _do_langsmith(session: PromptSession) -> None:
     """交互式配置 LangSmith"""
@@ -353,9 +356,7 @@ def _langsmith_set(session: PromptSession, current) -> None:
         console.print("\n[bold]LangSmith API Key[/bold]")
 
     try:
-        key = pt_prompt(
-            HTML("<ansigreen>› </ansigreen>"), is_password=True
-        ).strip()
+        key = pt_prompt(HTML("<ansigreen>› </ansigreen>"), is_password=True).strip()
     except (KeyboardInterrupt, EOFError):
         console.print("\n[yellow]已取消[/yellow]")
         return
@@ -385,9 +386,11 @@ def _langsmith_set(session: PromptSession, current) -> None:
         f"\n[green]✓ 已保存[/green] LangSmith · project={project} · {masked_new}"
     )
 
+
 # ---------------------------------------------------------------------------
 # Provider / Model / Key 交互（与之前一致）
 # ---------------------------------------------------------------------------
+
 
 def _pick_provider(session: PromptSession, current) -> str:
     providers = list(PROVIDER_MODELS.keys())
@@ -424,9 +427,7 @@ def _pick_model(session: PromptSession, provider: str, current) -> str:
 
     if not models:
         try:
-            return session.prompt(
-                HTML("<ansigreen>模型名称 › </ansigreen>")
-            ).strip()
+            return session.prompt(HTML("<ansigreen>模型名称 › </ansigreen>")).strip()
         except (KeyboardInterrupt, EOFError):
             raise _Cancelled()
 

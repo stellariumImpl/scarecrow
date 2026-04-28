@@ -30,6 +30,7 @@ def build_system_prompt(skills_dir: Path, workspace: Path | None = None) -> str:
 
     if workspace is not None:
         from scarecrow.workspace import workspace_brief
+
         parts.append(workspace_brief(workspace))
 
     blocks = load_skill_blocks(skills_dir)
@@ -165,7 +166,7 @@ print(f"完整数据: {df_full.shape},探查使用 10 万行采样")
 
 def ensure_builtin_skills(skills_dir: Path) -> None:
     """首次启动时把内置 Skills 写入 skills_dir。
-    
+
     已有非空文件则不覆盖(尊重用户编辑),
     空文件视为"未初始化",重新写入。
     """

@@ -9,7 +9,6 @@ import traceback
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-
 # 单次工具输出最大字符数。LLM 上下文有限,过长输出无意义。
 _MAX_OUTPUT_CHARS = 8000
 
@@ -52,6 +51,7 @@ def run_python(code: str) -> str:
         try:
             import numpy as np
             import pandas as pd
+
             _NAMESPACE["pd"] = pd
             _NAMESPACE["np"] = np
         except ImportError as e:

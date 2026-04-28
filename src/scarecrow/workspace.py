@@ -9,9 +9,20 @@ _DATA_EXTS = {".csv", ".parquet", ".jsonl", ".xlsx", ".xls"}
 
 # 扫描时跳过的目录名
 _IGNORED_DIRS = {
-    ".git", ".venv", "venv", "env", "__pycache__",
-    "node_modules", ".idea", ".vscode", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", "dist", "build", ".DS_Store",
+    ".git",
+    ".venv",
+    "venv",
+    "env",
+    "__pycache__",
+    "node_modules",
+    ".idea",
+    ".vscode",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "dist",
+    "build",
+    ".DS_Store",
 }
 
 # 最多列出的文件数,防止上下文爆炸
