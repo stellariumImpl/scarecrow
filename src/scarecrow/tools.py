@@ -10,6 +10,10 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 
+# 单次工具输出最大字符数。LLM 上下文有限,过长输出无意义。
+_MAX_OUTPUT_CHARS = 8000
+
+
 # ---------------------------------------------------------------------------
 # 持久 Python 命名空间：跨多次工具调用保留变量
 # ---------------------------------------------------------------------------
@@ -58,6 +62,18 @@ def run_python(code: str) -> str:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             exec(code, _NAMESPACE)
         out = buf.getvalue()
-        return out if out else "(执行成功，无输出)"
     except Exception:
-        return f"执行错误:\n{traceback.format_exc()}"
+        out = f"执行错误:\n{traceback.format_exc()}"
+
+    if not out:
+        return "(执行成功，无输出)"
+
+    # 输出截断保护
+    if len(out) > _MAX_OUTPUT_CHARS:
+        truncated = out[:_MAX_OUTPUT_CHARS]
+        return (
+            f"{truncated}\n\n"
+            f"[... 输出已截断,原始长度 {len(out)} 字符,"
+            f"建议用 .head() / .sample() / 切片缩小输出]"
+        )
+    return out
