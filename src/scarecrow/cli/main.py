@@ -1,3 +1,5 @@
+# src/scarecrow/cli/main.py
+
 from pathlib import Path
 
 import typer

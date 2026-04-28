@@ -1,3 +1,5 @@
+# src/scarecrow/repl.py
+
 """Scarecrow REPL - 交互式对话循环"""
 
 from pathlib import Path
@@ -16,7 +18,7 @@ from scarecrow.config import (
     CONFIG_FILE,
     CONFIG_DIR,
 )
-from scarecrow.workspace import workspace_summary
+
 
 console = Console()
 
@@ -31,7 +33,7 @@ def start_repl(workspace: Path) -> None:
     session: PromptSession = PromptSession(history=FileHistory(str(history_file)))
 
     console.print(f"Scarecrow — 当前工作区: {workspace}")
-    console.print(workspace_summary(workspace))
+
     console.print("\n输入 /help 查看命令，/quit 退出")
 
     while True:

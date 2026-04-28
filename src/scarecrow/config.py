@@ -1,3 +1,5 @@
+# src/scarecrow/config.py
+
 """配置管理：读写 ~/.scarecrow/config.json"""
 
 import json
