@@ -6,6 +6,7 @@ from pathlib import Path
 
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
+from langchain_core.messages import AIMessage, ToolMessage
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
@@ -15,11 +16,20 @@ from scarecrow.config import (
     PROVIDER_LABELS,
     PROVIDER_MODELS,
     LLMConfig,
-    load_config,
-    save_config,
+    LangSmithConfig,
     CONFIG_FILE,
     CONFIG_DIR,
+    SKILLS_DIR,
+    clear_langsmith_config,
+    ensure_config_dir,
+    load_config,
+    load_langsmith_config,
+    save_config,
+    save_langsmith_config,
 )
+from scarecrow.langsmith_setup import apply_langsmith_env
+from scarecrow.skills import build_system_prompt, ensure_builtin_skills
+from scarecrow.tools import run_python, reset_namespace
 
 
 console = Console()
@@ -31,13 +41,24 @@ class _Cancelled(Exception):
 
 def start_repl(workspace: Path) -> None:
     """启动 REPL 循环"""
+    ensure_config_dir()
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_builtin_skills(SKILLS_DIR)
+
+    # 启动时根据配置开启 LangSmith
+    ls_enabled, ls_project = apply_langsmith_env()
+
     history_file = CONFIG_DIR / "history.txt"
     session: PromptSession = PromptSession(history=FileHistory(str(history_file)))
 
     console.print(f"Scarecrow — 当前工作区: {workspace}")
+    console.print(f"[dim]Skills 目录: {SKILLS_DIR}[/dim]")
+    if ls_enabled:
+        console.print(f"[dim]LangSmith: 已启用 (project: {ls_project})[/dim]")
+    else:
+        console.print("[dim]LangSmith: 未启用 (输入 /langsmith 配置)[/dim]")
     console.print("\n输入 /help 查看命令，/quit 退出")
 
-    # Agent 与对话历史，懒初始化
     agent = None
     messages: list = []
 
@@ -60,17 +81,25 @@ def start_repl(workspace: Path) -> None:
             _show_help()
         elif user_input == "/config":
             _do_config(session)
-            agent = None  # 配置变了，下次对话重建 Agent
+            agent = None
+        elif user_input == "/langsmith":
+            _do_langsmith(session)
+            apply_langsmith_env()
+            agent = None  # tracing 状态变了，重建 agent 让新设置生效
         elif user_input == "/reset":
             messages = []
-            console.print("[dim]已清空对话历史[/dim]")
+            reset_namespace()
+            console.print("[dim]已清空对话历史与 Python 命名空间[/dim]")
         else:
             agent, messages = _handle_chat(user_input, agent, messages)
 
 
+# ---------------------------------------------------------------------------
+# 对话处理 + tool call 可视化
+# ---------------------------------------------------------------------------
+
 def _handle_chat(user_input: str, agent, messages: list):
-    """处理一轮对话，返回更新后的 agent 与 messages"""
-    # 懒初始化 Agent
+    """处理一轮对话，流式打印 tool call 过程"""
     if agent is None:
         cfg = load_config()
         if cfg is None:
@@ -83,27 +112,87 @@ def _handle_chat(user_input: str, agent, messages: list):
             console.print(f"[red]Agent 初始化失败: {e}[/red]")
             return agent, messages
 
-    # 追加用户消息
     messages.append({"role": "user", "content": user_input})
 
     try:
-        with console.status("思考中..."):
-            result = agent.invoke({"messages": messages})
-        # invoke 返回的 messages 是完整对话（含 tool calls），直接覆盖
-        messages = result["messages"]
-        last = messages[-1]
-        content = getattr(last, "content", str(last))
-        console.print(f"[green]{content}[/green]")
+        # 用 stream 模式取每一步更新，便于实时打印 tool call
+        result_messages = list(messages)
+        printed_tool_calls: set[str] = set()
+
+        for chunk in agent.stream({"messages": messages}, stream_mode="values"):
+            new_messages = chunk.get("messages", [])
+            # 只处理新增的消息
+            for msg in new_messages[len(result_messages):]:
+                _render_message(msg, printed_tool_calls)
+            result_messages = new_messages
+
+        messages = result_messages
     except Exception as e:
-        # 出错时回滚最后那条用户消息，避免污染历史
         messages.pop()
         console.print(f"[red]Agent 出错: {e}[/red]")
 
     return agent, messages
 
 
+def _render_message(msg, printed_tool_calls: set) -> None:
+    """根据消息类型渲染：tool call / tool result / 最终回答"""
+    # 1. AI 决定调用工具
+    if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+        for tc in msg.tool_calls:
+            tc_id = tc.get("id", "")
+            if tc_id in printed_tool_calls:
+                continue
+            printed_tool_calls.add(tc_id)
+            name = tc.get("name", "?")
+            args = tc.get("args", {}) or {}
+            console.print(f"\n[cyan]⚙ {name}[/cyan]")
+            _print_tool_args(args)
+        return
+
+    # 2. 工具执行结果
+    if isinstance(msg, ToolMessage):
+        content = str(msg.content) if msg.content else ""
+        size = len(content)
+        # 简短输出直接显示，长输出只显示字符数
+        if size <= 200 and "\n" not in content:
+            console.print(f"[green]✓[/green] [dim]{content}[/dim]")
+        else:
+            console.print(f"[green]✓[/green] [dim](输出 {size} 字符)[/dim]")
+        return
+
+    # 3. AI 最终回答（无 tool_calls 的 AIMessage）
+    if isinstance(msg, AIMessage):
+        content = msg.content
+        if content:
+            text = content if isinstance(content, str) else str(content)
+            console.print(f"\n[bold green]{text}[/bold green]")
+
+
+def _print_tool_args(args: dict) -> None:
+    """打印 tool 参数：单个短参数显示完整，否则只显示键名"""
+    if not args:
+        return
+    # run_python 的 code 参数特殊处理：截断显示
+    if "code" in args and len(args) == 1:
+        code = str(args["code"])
+        first_line = code.split("\n")[0][:80]
+        more = " ..." if "\n" in code or len(code) > 80 else ""
+        console.print(f"  [dim]{first_line}{more}[/dim]")
+        return
+    # 通用参数：键值对缩略
+    for k, v in args.items():
+        v_str = str(v)
+        if len(v_str) > 60:
+            v_str = v_str[:60] + "..."
+        console.print(f"  [dim]{k}={v_str}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Agent 构建
+# ---------------------------------------------------------------------------
+
 def _build_agent(cfg: LLMConfig):
-    """按配置构建一个最小 Agent（暂无工具）"""
+    """按配置构建 Agent。system prompt 来自 ~/.scarecrow/skills/"""
     model_id = f"{cfg.provider}:{cfg.model}"
     model_kwargs: dict = {"temperature": 0}
     if cfg.provider != "ollama":
@@ -113,22 +202,30 @@ def _build_agent(cfg: LLMConfig):
 
     return create_agent(
         model=model,
-        tools=[],
-        system_prompt="你是 Scarecrow，一个本地数据分析助手。用中文回答用户的问题。",
+        tools=[run_python],
+        system_prompt=build_system_prompt(SKILLS_DIR),
     )
 
 
+# ---------------------------------------------------------------------------
+# 帮助
+# ---------------------------------------------------------------------------
+
 def _show_help() -> None:
     console.print("[bold]可用命令：[/bold]")
-    console.print("  /help    显示帮助")
-    console.print("  /config  配置 LLM")
-    console.print("  /reset   清空当前对话历史")
-    console.print("  /quit    退出")
+    console.print("  /help       显示帮助")
+    console.print("  /config     配置 LLM")
+    console.print("  /langsmith  配置 LangSmith 追踪（可选）")
+    console.print("  /reset      清空对话历史与 Python 命名空间")
+    console.print("  /quit       退出")
     console.print("  其他输入会发送给 Agent")
 
 
+# ---------------------------------------------------------------------------
+# /config 流程（不变，照旧）
+# ---------------------------------------------------------------------------
+
 def _do_config(session: PromptSession) -> None:
-    """交互式配置 LLM（菜单风格）"""
     current = load_config()
 
     console.print("[bold cyan]LLM 配置[/bold cyan]")
@@ -156,6 +253,105 @@ def _do_config(session: PromptSession) -> None:
     )
     console.print(f"[dim]配置文件: {CONFIG_FILE}[/dim]")
 
+
+# ---------------------------------------------------------------------------
+# /langsmith 流程
+# ---------------------------------------------------------------------------
+
+def _do_langsmith(session: PromptSession) -> None:
+    """交互式配置 LangSmith"""
+    current = load_langsmith_config()
+
+    console.print("[bold cyan]LangSmith 追踪配置[/bold cyan]")
+    console.print(
+        "[dim]LangSmith 用于在网页端可视化 Agent 的每次推理与 tool call。[/dim]"
+    )
+    console.print("[dim]注册地址: https://smith.langchain.com/[/dim]")
+    if current and current.enabled and current.api_key:
+        console.print(
+            f"[dim]当前: 已启用 · project={current.project} · {current.masked_key()}[/dim]"
+        )
+    else:
+        console.print("[dim]当前: 未启用[/dim]")
+    console.print("[dim]按 Ctrl+C 取消[/dim]")
+
+    console.print("\n[bold]操作:[/bold]")
+    console.print("  [cyan]1.[/cyan] 配置 / 更新 API Key")
+    console.print("  [cyan]2.[/cyan] 关闭 LangSmith")
+    console.print("  [cyan]3.[/cyan] 取消")
+
+    try:
+        while True:
+            raw = session.prompt(HTML("<ansigreen>› </ansigreen>")).strip()
+            if raw == "1":
+                _langsmith_set(session, current)
+                return
+            if raw == "2":
+                clear_langsmith_config()
+                console.print("[green]✓ 已关闭 LangSmith[/green]")
+                return
+            if raw == "3" or not raw:
+                console.print("[yellow]已取消[/yellow]")
+                return
+            console.print("[red]请输入 1 / 2 / 3[/red]")
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[yellow]已取消[/yellow]")
+
+
+def _langsmith_set(session: PromptSession, current) -> None:
+    """配置 LangSmith api key 与 project"""
+    from prompt_toolkit import prompt as pt_prompt  # 临时一次性 prompt
+
+    # API Key（用独立的 prompt，避免污染主 session 的密码状态）
+    existing_key = current.api_key if current else ""
+    if existing_key:
+        masked = (
+            f"{existing_key[:4]}...{existing_key[-4:]}"
+            if len(existing_key) > 8
+            else "*" * len(existing_key)
+        )
+        console.print(
+            f"\n[bold]LangSmith API Key[/bold] [dim](Enter 保留: {masked})[/dim]"
+        )
+    else:
+        console.print("\n[bold]LangSmith API Key[/bold]")
+
+    try:
+        key = pt_prompt(
+            HTML("<ansigreen>› </ansigreen>"), is_password=True
+        ).strip()
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[yellow]已取消[/yellow]")
+        return
+
+    if not key and existing_key:
+        key = existing_key
+    if not key:
+        console.print("[red]API Key 不可空白[/red]")
+        return
+
+    # Project 名称（普通输入，绝对不能加密码模式）
+    default_project = current.project if current else "scarecrow"
+    console.print(
+        f"\n[bold]Project 名称[/bold] [dim](Enter 使用: {default_project})[/dim]"
+    )
+    try:
+        project = pt_prompt(HTML("<ansigreen>› </ansigreen>")).strip()
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[yellow]已取消[/yellow]")
+        return
+    if not project:
+        project = default_project
+
+    save_langsmith_config(LangSmithConfig(api_key=key, project=project, enabled=True))
+    masked_new = f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "*" * len(key)
+    console.print(
+        f"\n[green]✓ 已保存[/green] LangSmith · project={project} · {masked_new}"
+    )
+
+# ---------------------------------------------------------------------------
+# Provider / Model / Key 交互（与之前一致）
+# ---------------------------------------------------------------------------
 
 def _pick_provider(session: PromptSession, current) -> str:
     providers = list(PROVIDER_MODELS.keys())
@@ -241,6 +437,8 @@ def _pick_model(session: PromptSession, provider: str, current) -> str:
 
 
 def _input_api_key(session: PromptSession, provider: str, current) -> str:
+    from prompt_toolkit import prompt as pt_prompt
+
     label = PROVIDER_LABELS.get(provider, provider)
     existing = None
     if current and current.provider == provider:
@@ -260,7 +458,7 @@ def _input_api_key(session: PromptSession, provider: str, current) -> str:
         console.print(f"\n[bold]输入 {label} API Key[/bold]")
 
     try:
-        key = session.prompt(
+        key = pt_prompt(
             HTML("<ansigreen>› </ansigreen>"),
             is_password=True,
         ).strip()
