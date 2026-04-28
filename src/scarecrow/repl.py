@@ -28,8 +28,36 @@ from scarecrow.config import (
     save_langsmith_config,
 )
 from scarecrow.langsmith_setup import apply_langsmith_env
-from scarecrow.skills import build_system_prompt, ensure_builtin_skills
+from scarecrow.context import build_system_prompt
+from scarecrow.skills import ensure_builtin_skills
 from scarecrow.tools import run_python, reset_namespace
+
+from scarecrow.router import IntentRouter
+
+
+def _debug_route(text: str, agent, workspace: Path) -> None:
+    """调试 Intent Router。"""
+
+    if not text:
+        console.print("[yellow]用法: /route <用户请求>[/yellow]")
+        return
+
+    cfg = load_config()
+    if cfg is None:
+        console.print("[yellow]请先运行 /config 配置 LLM[/yellow]")
+        return
+
+    try:
+        with console.status("Routing..."):
+            model = load_chat_model_from_config(cfg)
+            router = IntentRouter(model)
+            decision = router.route(text)
+    except Exception as e:
+        console.print(f"[red]Router 出错: {e}[/red]")
+        return
+
+    console.print_json(decision.model_dump_json(indent=2, ensure_ascii=False))
+
 
 console = Console()
 
@@ -89,6 +117,8 @@ def start_repl(workspace: Path) -> None:
             messages = []
             reset_namespace()
             console.print("[dim]已清空对话历史与 Python 命名空间[/dim]")
+        elif user_input.startswith("/route "):
+            _debug_route(user_input.removeprefix("/route ").strip(), agent, workspace)
         else:
             agent, messages = _handle_chat(user_input, agent, messages, workspace)
 
@@ -239,7 +269,10 @@ def _build_agent(cfg: LLMConfig, workspace: Path):
     return create_agent(
         model=model,
         tools=[run_python],
-        system_prompt=build_system_prompt(SKILLS_DIR, workspace),
+        system_prompt=build_system_prompt(
+            workspace=workspace,
+            skills_dir=SKILLS_DIR,
+        ),
     )
 
 
@@ -254,6 +287,7 @@ def _show_help() -> None:
     console.print("  /config     配置 LLM")
     console.print("  /langsmith  配置 LangSmith 追踪（可选）")
     console.print("  /reset      清空对话历史与 Python 命名空间")
+    console.print("  /route 文本  调试 Intent Router")
     console.print("  /quit       退出")
     console.print("  其他输入会发送给 Agent")
 
