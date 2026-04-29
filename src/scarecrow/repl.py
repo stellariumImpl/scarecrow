@@ -169,6 +169,7 @@ def _handle_chat(user_input: str, state: SessionState) -> None:
 
     console.print(
         f"[dim]route={decision.intent}, "
+        f"capabilities={decision.required_capabilities}, "
         f"skills={selected_skills}, "
         f"tools={selected_tools}, "
         f"confidence={decision.confidence:.2f}[/dim]"

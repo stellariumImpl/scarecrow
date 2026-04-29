@@ -11,6 +11,18 @@ from scarecrow.skills import (
 
 BASE_PROMPT = "你是 Scarecrow，一个本地数据分析助手。用中文回答用户。"
 
+TOOL_USE_POLICY = """## 工具使用规则
+
+- 只调用完成当前用户请求所必需的工具。
+- 不要反复调用同一个工具查询相同参数。
+- 文件查找类请求中，只查找用户明确提到的文件名或路径片段。
+- 如果文件解析工具返回没有找到，不要猜测其他文件名，不要转而查询无关文件。
+- 如果工具已经返回“没有找到”，不要换成无关文件继续查找。
+- 禁止用同一个工具和同一组参数重复调用。
+- 如果需要更多信息，直接向用户说明需要补充，而不是继续盲目搜索。
+- 单轮回答中通常最多调用 2 次工具；除非用户明确要求深入扫描。
+"""
+
 
 class ContextAssembler:
     """负责组装 Agent system prompt。
@@ -24,7 +36,7 @@ class ContextAssembler:
         self.skills_dir = skills_dir
 
     def build_system_prompt(self, payload: ContextBuildInput) -> str:
-        parts: list[str] = [BASE_PROMPT]
+        parts: list[str] = [BASE_PROMPT, TOOL_USE_POLICY]
 
         if payload.workspace is not None:
             parts.append(self._build_workspace_context(payload.workspace))
