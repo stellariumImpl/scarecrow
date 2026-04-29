@@ -11,7 +11,7 @@ from scarecrow.context import build_system_prompt
 from scarecrow.llm import load_chat_model_from_config
 from scarecrow.router import IntentRouter, RouteDecision
 from scarecrow.runtime.state import SessionState
-from scarecrow.tools import build_default_tool_registry
+from scarecrow.tools import build_default_tool_registry, set_workspace
 
 
 def route_user_input(user_input: str, cfg: LLMConfig) -> RouteDecision:
@@ -41,8 +41,10 @@ def select_tools_from_decision(decision: RouteDecision) -> list[str]:
     if decision.intent == "data_analysis" and "run_python" not in selected_tools:
         selected_tools.append("run_python")
 
-    return selected_tools
+    if decision.intent == "file_inspection" and "list_data_files" not in selected_tools:
+        selected_tools.append("list_data_files")
 
+    return selected_tools
 
 def build_agent(
     cfg: LLMConfig,
@@ -54,6 +56,8 @@ def build_agent(
     """按配置、工作区、skills 和 tools 构建 Agent。"""
 
     model = load_chat_model_from_config(cfg)
+
+    set_workspace(workspace)
 
     tool_registry = build_default_tool_registry()
     tools = tool_registry.select_tools(selected_tools or [])

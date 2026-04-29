@@ -81,8 +81,10 @@ _ROUTER_SYSTEM_PROMPT = """你是 Scarecrow 的 Intent Router。
   如果是系统化探索数据，还应包含 ["data-explorer"]
 
 - file_inspection:
-  当前没有专门文件工具时，可以不建议工具。
-  如果用户明确要分析文件内容，可转为 data_analysis。
+  required_tools 通常包含 ["list_data_files"]
+  required_skills 通常为空
+  只需要列出工作区数据文件时，不要使用 run_python
+  如果用户明确要求读取文件内容或统计数据，则转为 data_analysis
 
 - chat:
   通常不需要 tool 和 skill。

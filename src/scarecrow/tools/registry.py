@@ -1,3 +1,5 @@
+# src/scarecrow/tools/registry.py
+
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -5,6 +7,7 @@ from langchain_core.tools import BaseTool
 
 from scarecrow.tools.python import run_python
 from scarecrow.tools.schemas import ToolMetadata
+from scarecrow.tools.workspace import list_data_files
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,18 @@ def build_default_tool_registry() -> ToolRegistry:
                 enabled=True,
             ),
             tool=run_python,
+        )
+    )
+
+    registry.register(
+        ToolEntry(
+            metadata=ToolMetadata(
+                name="list_data_files",
+                description="列出当前工作区下的数据文件，只读，不读取文件内容。",
+                risk_level="low",
+                enabled=True,
+            ),
+            tool=list_data_files,
         )
     )
 
