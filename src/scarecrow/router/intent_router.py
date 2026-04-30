@@ -132,14 +132,14 @@ Skill 是任务方法论，不等同于工具。
   required_tools = []
   risk_level = "low"
 
-- 用户问“帮我找 users / README 在哪里 / 有没有某个文件 / 某文件路径是什么”
+- 用户问“帮我找某个文件 / 某文件在哪里 / 有没有某个文件 / 某文件路径是什么”
   intent = "file_inspection"
   required_capabilities 通常包含 ["workspace.resolve_path"]
   required_skills = []
   required_tools = []
   risk_level = "low"
 
-- 用户问“看一下 users 前 5 行 / 预览数据 / 看看数据长什么样 / 查看列名”
+- 用户问“看一下某个数据文件前几行 / 预览数据 / 看看数据长什么样 / 查看列名”
   intent = "data_analysis"
   required_capabilities 通常包含 ["workspace.resolve_path", "data.preview"]
   required_skills = []
@@ -190,7 +190,7 @@ Skill 是任务方法论，不等同于工具。
 - 简单数据预览优先使用 data.preview，不要默认要求 python.execute。
 - 复杂分析、清洗、聚合才需要 python.execute。
 - 文件查找类请求不要猜测其他文件名。
-- 用户让找 "users"，只查找 "users"，不要转而查询 README.md 或其他无关文件。
+- 用户让找某个文件名或路径片段时，只查找该片段，不要转而查询其他无关文件。
 - 如果工具返回没有找到，应直接告诉用户没有找到，并建议用户确认文件名或查看项目结构。
 - 如果用户只是问项目结构或列文件，不要要求 python.execute。
 - 如果用户只是普通聊天，不要要求任何 capability。

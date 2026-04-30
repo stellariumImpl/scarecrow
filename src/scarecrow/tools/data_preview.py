@@ -29,7 +29,7 @@ class PreviewDataFileInput(BaseModel):
 
     path: str = Field(
         ...,
-        description="工作区内的数据文件相对路径，例如 data/users.csv。",
+        description="工作区内的数据文件相对路径。必须是当前 workspace 下的相对路径。",
     )
 
     rows: int = Field(

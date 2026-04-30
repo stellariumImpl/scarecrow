@@ -230,15 +230,17 @@ def _render_tool_result(content: str) -> None:
         return
 
     preview_lines = lines[:5]
-    preview = "\n".join(f"  [dim]{_truncate(ln, 100)}[/dim]" for ln in preview_lines)
-    more = (
-        f"\n  [dim]... ({len(lines) - 5} 行未显示, 共 {size} 字符)[/dim]"
-        if len(lines) > 5
-        else ""
-    )
+    console.print("[green]✓[/green]")
 
-    console.print(f"[green]✓[/green]\n{preview}{more}")
+    for line in preview_lines:
+        console.print(f"  {_truncate(line, 100)}", style="dim", markup=False)
 
+    if len(lines) > 5:
+        console.print(
+            f"  ... ({len(lines) - 5} 行未显示, 共 {size} 字符)",
+            style="dim",
+            markup=False,
+        )
 
 def _truncate(s: str, max_len: int) -> str:
     """单行截断：超过 max_len 用 ... 收尾。"""
@@ -276,7 +278,8 @@ def _render_message(msg, printed_tool_calls: set) -> None:
         content = msg.content
         if content:
             text = content if isinstance(content, str) else str(content)
-            console.print(f"\n[bold green]{text}[/bold green]")
+            console.print()
+            console.print(text, style="bold green", markup=False)
 
 
 def _print_tool_args(args: dict) -> None:
@@ -289,14 +292,14 @@ def _print_tool_args(args: dict) -> None:
         code = str(args["code"])
         first_line = code.split("\n")[0][:80]
         more = " ..." if "\n" in code or len(code) > 80 else ""
-        console.print(f"  [dim]{first_line}{more}[/dim]")
+        console.print(f"  {first_line}{more}", style="dim", markup=False)
         return
 
     for k, v in args.items():
         v_str = str(v)
         if len(v_str) > 60:
             v_str = v_str[:60] + "..."
-        console.print(f"  [dim]{k}={v_str}[/dim]")
+        console.print(f"  {k}={v_str}", style="dim", markup=False)
 
 
 def _show_help() -> None:
