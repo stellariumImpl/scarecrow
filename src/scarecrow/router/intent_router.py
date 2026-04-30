@@ -53,22 +53,27 @@ def _build_router_prompt(capability_index: str = "") -> str:
 你对路由判断的置信度，范围 0 到 1。
 
 3. required_capabilities
-完成任务所需的抽象能力，不是具体工具名。
+完成任务所需的抽象能力，不是具体工具名，也不是具体 Skill 名。
 例如：
 - workspace.resolve_path
 - workspace.list_data_files
 - workspace.inspect_structure
 - data.preview
+- data.explore
+- data.analyze
+- data.clean
 - python.execute
 
 4. required_skills
-建议加载的 Skill 名称。
-注意：Skill 是任务方法论，不等同于工具。
-如果不需要 Skill，输出 []。
+过渡字段，默认输出 []。
+Skill 是任务方法论，不等同于工具。
+优先通过 required_capabilities 让系统自动选择 Skill。
+只有当你非常确定某个 Skill 名称，并且该 Skill 是完成任务所需的方法论时，才填写 required_skills。
+不要为了普通数据分析默认填写 Skill 名。
 
 5. required_tools
 过渡字段。默认输出 []。
-不要主动填工具名，除非系统明确要求兼容旧逻辑。
+不要主动填工具名。工具由系统根据 required_capabilities 自动选择。
 
 6. needs_clarification
 如果用户意图不明确、缺少文件名、缺少任务目标，设为 true。
@@ -107,33 +112,59 @@ def _build_router_prompt(capability_index: str = "") -> str:
 能力选择参考：
 
 - 用户问“当前有哪些数据文件 / 有没有 csv / 数据集在哪里”
+  intent = "file_inspection"
   required_capabilities 通常包含 ["workspace.list_data_files"]
+  required_skills = []
+  required_tools = []
+  risk_level = "low"
 
 - 用户问“当前有什么文件 / 当前目录有什么 / 有哪些文件”
+  intent = "file_inspection"
   required_capabilities 通常包含 ["workspace.list_files"]
+  required_skills = []
+  required_tools = []
+  risk_level = "low"
 
 - 用户问“项目结构 / 目录结构 / 工程结构 / 有哪些模块”
+  intent = "file_inspection"
   required_capabilities 通常包含 ["workspace.inspect_structure"]
+  required_skills = []
+  required_tools = []
+  risk_level = "low"
 
 - 用户问“帮我找 users / README 在哪里 / 有没有某个文件 / 某文件路径是什么”
+  intent = "file_inspection"
   required_capabilities 通常包含 ["workspace.resolve_path"]
+  required_skills = []
+  required_tools = []
+  risk_level = "low"
 
 - 用户问“看一下 users 前 5 行 / 预览数据 / 看看数据长什么样 / 查看列名”
+  intent = "data_analysis"
   required_capabilities 通常包含 ["workspace.resolve_path", "data.preview"]
+  required_skills = []
+  required_tools = []
+  risk_level = "low"
 
 - 用户问“探索一下数据 / 做 EDA / 看 shape dtype 缺失值 分布”
-  required_capabilities 通常包含 ["workspace.resolve_path", "python.execute"]
-  required_skills 通常包含 ["run-python", "data-explorer"]
+  intent = "data_analysis"
+  required_capabilities 通常包含 ["workspace.resolve_path", "python.execute", "data.explore", "data.profile"]
+  required_skills 默认输出 []
+  required_tools = []
   risk_level 通常为 "medium"
 
 - 用户问“统计 / 聚合 / 相关性 / 缺失率 / 平均值 / 分组分析”
-  required_capabilities 通常包含 ["workspace.resolve_path", "python.execute"]
-  required_skills 通常包含 ["run-python"]
+  intent = "data_analysis"
+  required_capabilities 通常包含 ["workspace.resolve_path", "python.execute", "data.analyze"]
+  required_skills 默认输出 []
+  required_tools = []
   risk_level 通常为 "medium"
 
 - 用户问“清洗 / 去重 / 处理缺失 / 转换字段 / 保存结果”
-  required_capabilities 通常包含 ["workspace.resolve_path", "python.execute"]
-  required_skills 通常包含 ["run-python"]
+  intent = "data_analysis"
+  required_capabilities 通常包含 ["workspace.resolve_path", "python.execute", "data.clean"]
+  required_skills 默认输出 []
+  required_tools = []
   risk_level 至少为 "medium"
 
 - 用户问“换模型 / 设置 API key / 配置 DeepSeek / 配置 OpenAI / 开启 LangSmith”
@@ -141,18 +172,26 @@ def _build_router_prompt(capability_index: str = "") -> str:
   required_capabilities = []
   required_skills = []
   required_tools = []
+  risk_level = "low"
 
 - 用户提供 Python 报错、traceback、代码片段并要求修复
   intent = "code_debugging"
   required_capabilities 通常为空，除非明确需要执行代码
+  required_skills = []
+  required_tools = []
   risk_level 通常为 "medium"
 
-工具使用约束：
+工具和 Skill 选择原则：
+- required_capabilities 是主输出。
+- Tool 由系统根据 required_capabilities 自动选择。
+- Skill 也会逐步由系统根据 required_capabilities 自动选择。
+- required_skills 是过渡字段，不要默认填写。
+- required_tools 是过渡字段，不要默认填写。
+- 简单数据预览优先使用 data.preview，不要默认要求 python.execute。
+- 复杂分析、清洗、聚合才需要 python.execute。
 - 文件查找类请求不要猜测其他文件名。
 - 用户让找 "users"，只查找 "users"，不要转而查询 README.md 或其他无关文件。
 - 如果工具返回没有找到，应直接告诉用户没有找到，并建议用户确认文件名或查看项目结构。
-- 简单数据预览优先使用 data.preview，不要默认要求 python.execute。
-- 复杂分析、清洗、聚合才需要 python.execute。
 - 如果用户只是问项目结构或列文件，不要要求 python.execute。
 - 如果用户只是普通聊天，不要要求任何 capability。
 - 如果不确定用户要找哪个文件，应澄清，而不是猜测。
@@ -303,6 +342,26 @@ def _fallback_route(user_input: str, raw_output: str = "") -> RouteDecision:
         "看看数据",
     ]
 
+    data_explore_keywords = [
+        "探索",
+        "eda",
+        "profile",
+        "概览",
+        "整体情况",
+        "数据情况",
+        "了解一下数据",
+    ]
+
+    data_clean_keywords = [
+        "清洗",
+        "去重",
+        "处理缺失",
+        "缺失处理",
+        "转换字段",
+        "字段类型",
+        "保存结果",
+    ]
+
     data_analysis_keywords = [
         ".csv",
         ".parquet",
@@ -314,8 +373,6 @@ def _fallback_route(user_input: str, raw_output: str = "") -> RouteDecision:
         "缺失值",
         "统计",
         "分析",
-        "探索",
-        "清洗",
         "相关性",
         "分组",
         "聚合",
@@ -393,6 +450,37 @@ def _fallback_route(user_input: str, raw_output: str = "") -> RouteDecision:
             reason="Router 输出解析失败，按数据预览相关关键词保守兜底。",
         )
 
+    if any(k in lowered for k in data_explore_keywords):
+        return RouteDecision(
+            intent="data_analysis",
+            confidence=0.55,
+            required_capabilities=[
+                "workspace.resolve_path",
+                "python.execute",
+                "data.explore",
+                "data.profile",
+            ],
+            required_skills=[],
+            required_tools=[],
+            risk_level="medium",
+            reason="Router 输出解析失败，按数据探索相关关键词保守兜底。",
+        )
+
+    if any(k in lowered for k in data_clean_keywords):
+        return RouteDecision(
+            intent="data_analysis",
+            confidence=0.55,
+            required_capabilities=[
+                "workspace.resolve_path",
+                "python.execute",
+                "data.clean",
+            ],
+            required_skills=[],
+            required_tools=[],
+            risk_level="medium",
+            reason="Router 输出解析失败，按数据清洗相关关键词保守兜底。",
+        )
+
     if any(k in lowered for k in data_analysis_keywords):
         return RouteDecision(
             intent="data_analysis",
@@ -400,8 +488,9 @@ def _fallback_route(user_input: str, raw_output: str = "") -> RouteDecision:
             required_capabilities=[
                 "workspace.resolve_path",
                 "python.execute",
+                "data.analyze",
             ],
-            required_skills=["run-python"],
+            required_skills=[],
             required_tools=[],
             risk_level="medium",
             reason="Router 输出解析失败，按数据分析相关关键词保守兜底。",

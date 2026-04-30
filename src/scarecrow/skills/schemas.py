@@ -1,7 +1,10 @@
+# src/scarecrow/skills/schemas.py
+
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
 
 SkillSource = Literal["builtin", "user", "project"]
 
@@ -9,12 +12,14 @@ SkillSource = Literal["builtin", "user", "project"]
 class SkillMetadata(BaseModel):
     """Skill 的轻量元数据。
 
-    这部分信息适合进入 Router / Skill Index。
-    不应该把完整 SKILL.md 正文都塞进 Router。
+    capabilities 是可选增强字段：
+    - 旧版 skill 可以没有 capabilities
+    - 新版 skill 可以声明 capabilities，用于自动匹配
     """
 
     name: str = Field(..., min_length=1)
     description: str = ""
+    capabilities: list[str] = Field(default_factory=list)
     path: Path
     source: SkillSource = "user"
     enabled: bool = True

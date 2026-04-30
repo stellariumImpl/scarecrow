@@ -1,3 +1,5 @@
+# src/scarecrow/skills/__init__.py
+
 from scarecrow.skills.builtins import ensure_builtin_skills
 from scarecrow.skills.loader import (
     build_skill_index,

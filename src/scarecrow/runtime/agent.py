@@ -5,17 +5,21 @@ from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain_core.messages import AIMessage
 
 from scarecrow.config import LLMConfig, SKILLS_DIR
 from scarecrow.context import build_system_prompt
 from scarecrow.llm import load_chat_model_from_config
 from scarecrow.router import IntentRouter, RouteDecision
+from scarecrow.runtime.observation import extract_observations_with_llm
 from scarecrow.runtime.state import SessionState
+from scarecrow.skills import load_skill_registry
 from scarecrow.tools import (
     build_default_tool_registry,
     set_preview_workspace,
     set_workspace,
 )
+
 
 def route_user_input(user_input: str, cfg: LLMConfig) -> RouteDecision:
     """对用户输入做结构化路由。"""
@@ -28,13 +32,31 @@ def route_user_input(user_input: str, cfg: LLMConfig) -> RouteDecision:
     return router.route(user_input)
 
 
-def select_skills_from_decision(decision: RouteDecision) -> list[str]:
-    """根据 RouteDecision 选择本轮要注入的 Skill。
+def select_skills_from_decision(
+    decision: RouteDecision,
+    skills_dir: Path = SKILLS_DIR,
+) -> list[str]:
+    """根据 capabilities 和 Router 建议选择本轮要注入的 Skill。
 
-    Skill 由 Router 建议，Runtime 只做去重。
+    渐进式策略：
+    1. 先根据 required_capabilities 自动匹配声明了 capabilities 的 skill
+    2. 再合并 Router.required_skills
+    3. 去重并保持顺序
     """
 
-    return list(dict.fromkeys(decision.required_skills))
+    skill_registry = load_skill_registry(skills_dir)
+
+    selected: list[str] = []
+
+    selected.extend(
+        skill_registry.select_skill_names_by_capabilities(
+            decision.required_capabilities
+        )
+    )
+
+    selected.extend(decision.required_skills)
+
+    return list(dict.fromkeys(selected))
 
 
 def select_tools_from_decision(decision: RouteDecision) -> list[str]:
@@ -45,14 +67,16 @@ def select_tools_from_decision(decision: RouteDecision) -> list[str]:
 
     tool_registry = build_default_tool_registry()
 
-    # 新逻辑：capability-driven。
+    known_capabilities, _ = tool_registry.validate_capabilities(
+        decision.required_capabilities
+    )
+
     selected_tools = tool_registry.select_tool_names_by_capabilities(
-        required_capabilities=decision.required_capabilities,
+        required_capabilities=known_capabilities,
         max_risk=decision.risk_level,
     )
 
-    # 过渡兼容：如果 Router 还输出 required_tools，则合并进去。
-    # 后续稳定后可以删除这一段。
+    # 过渡兼容：如果旧字段 required_tools 仍有内容，则合并进去。
     for tool_name in decision.required_tools:
         if tool_name not in selected_tools:
             selected_tools.append(tool_name)
@@ -60,21 +84,34 @@ def select_tools_from_decision(decision: RouteDecision) -> list[str]:
     return selected_tools
 
 
-def _looks_like_preview_request(decision: RouteDecision) -> bool:
-    """判断 data_analysis 请求是否更像安全预览而不是复杂分析。
+def inspect_capability_selection(
+    decision: RouteDecision,
+) -> tuple[list[str], list[str], list[str]]:
+    """返回能力选择诊断信息。
 
-    这里先基于 Router 给出的工具/skill 做保守判断。
-    后面如果 RouteDecision 增加 task_type，可以替换掉这个启发式。
+    返回：
+    - known_capabilities
+    - unknown_capabilities
+    - selected_tools
     """
 
-    if "preview_data_file" in decision.required_tools:
-        return True
+    tool_registry = build_default_tool_registry()
 
-    if "run_python" in decision.required_tools:
-        return False
+    known_capabilities, unknown_capabilities = tool_registry.validate_capabilities(
+        decision.required_capabilities
+    )
 
-    # 没有复杂 skill 时，倾向于允许 preview。
-    return "data-explorer" not in decision.required_skills
+    selected_tools = tool_registry.select_tool_names_by_capabilities(
+        required_capabilities=known_capabilities,
+        max_risk=decision.risk_level,
+    )
+
+    for tool_name in decision.required_tools:
+        if tool_name not in selected_tools:
+            selected_tools.append(tool_name)
+
+    return known_capabilities, unknown_capabilities, selected_tools
+
 
 def build_agent(
     cfg: LLMConfig,
@@ -82,6 +119,7 @@ def build_agent(
     selected_skills: list[str] | None = None,
     selected_tools: list[str] | None = None,
     include_all_skills: bool = False,
+    task_state_brief: str | None = None,
 ):
     """按配置、工作区、skills 和 tools 构建 Agent。"""
 
@@ -102,6 +140,7 @@ def build_agent(
             include_all_skills=include_all_skills,
             include_skill_index=False,
             skills_dir=SKILLS_DIR,
+            task_state_brief=task_state_brief,
         ),
     )
 
@@ -122,17 +161,75 @@ def prepare_agent_for_message(
         selected_skills=selected_skills,
         selected_tools=selected_tools,
         include_all_skills=False,
+        task_state_brief=state.task_state.brief(),
     )
 
     state.agent = agent
 
     return agent, selected_skills, selected_tools
 
-def _is_duplicate_tool_call(msg, seen_tool_calls: set[str]) -> str | None:
-    """检测同一轮中是否重复调用同一个工具和同一组参数。
 
-    返回重复调用签名；没有重复则返回 None。
+def stream_agent_response(
+    cfg: LLMConfig,
+    state: SessionState,
+    user_input: str,
+) -> Iterator[Any]:
+    """向当前 agent 发送用户输入，并流式返回新增消息。
+
+    这个函数只负责执行，不负责渲染。
+    同一轮中会检测重复 tool call，避免 Agent 陷入无意义循环。
+    执行成功后，会用 LLM 自动从本轮消息中抽取 observations 写入 task_state。
     """
+
+    if state.agent is None:
+        raise RuntimeError("Agent is not initialized.")
+
+    state.messages.append({"role": "user", "content": user_input})
+
+    result_messages = list(state.messages)
+    emitted_messages: list[Any] = []
+    seen_tool_calls: set[str] = set()
+
+    try:
+        for chunk in state.agent.stream(
+            {"messages": state.messages},
+            stream_mode="values",
+            config={"recursion_limit": 8},
+        ):
+            new_messages = chunk.get("messages", [])
+
+            for msg in new_messages[len(result_messages):]:
+                duplicate = _is_duplicate_tool_call(msg, seen_tool_calls)
+                if duplicate:
+                    warning = _build_duplicate_tool_warning(duplicate)
+                    emitted_messages.append(warning)
+                    yield warning
+                    state.messages = result_messages
+                    return
+
+                emitted_messages.append(msg)
+                yield msg
+
+            result_messages = new_messages
+
+        state.messages = result_messages
+
+        if emitted_messages:
+            observation_model = load_chat_model_from_config(cfg)
+            extract_observations_with_llm(
+                model=observation_model,
+                messages=emitted_messages,
+                task_state=state.task_state,
+            )
+
+    except Exception:
+        if state.messages:
+            state.messages.pop()
+        raise
+
+
+def _is_duplicate_tool_call(msg, seen_tool_calls: set[str]) -> str | None:
+    """检测同一轮中是否重复调用同一个工具和同一组参数。"""
 
     tool_calls = getattr(msg, "tool_calls", None)
     if not tool_calls:
@@ -165,10 +262,8 @@ def _tool_call_signature(name: str, args: dict) -> str:
     return f"{name}:{args_text}"
 
 
-def _build_duplicate_tool_warning(signature: str):
+def _build_duplicate_tool_warning(signature: str) -> AIMessage:
     """构造一个轻量 AIMessage，提示工具调用已被中断。"""
-
-    from langchain_core.messages import AIMessage
 
     return AIMessage(
         content=(
@@ -177,47 +272,3 @@ def _build_duplicate_tool_warning(signature: str):
             "请确认要查找的文件名或换一个更明确的描述。"
         )
     )
-
-def stream_agent_response(
-    state: SessionState,
-    user_input: str,
-) -> Iterator[Any]:
-    """向当前 agent 发送用户输入，并流式返回新增消息。
-
-    这个函数只负责执行，不负责渲染。
-    同一轮中会检测重复 tool call，避免 Agent 陷入无意义循环。
-    """
-
-    if state.agent is None:
-        raise RuntimeError("Agent is not initialized.")
-
-    state.messages.append({"role": "user", "content": user_input})
-
-    result_messages = list(state.messages)
-    seen_tool_calls: set[str] = set()
-
-    try:
-        for chunk in state.agent.stream(
-            {"messages": state.messages},
-            stream_mode="values",
-            # config={"recursion_limit": 8},
-        ):
-            new_messages = chunk.get("messages", [])
-
-            for msg in new_messages[len(result_messages):]:
-                duplicate = _is_duplicate_tool_call(msg, seen_tool_calls)
-                if duplicate:
-                    yield _build_duplicate_tool_warning(duplicate)
-                    state.messages = result_messages
-                    return
-
-                yield msg
-
-            result_messages = new_messages
-
-        state.messages = result_messages
-
-    except Exception:
-        if state.messages:
-            state.messages.pop()
-        raise

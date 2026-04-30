@@ -1,0 +1,8 @@
+user_id,name,age,city,signup_date
+1,Alice,20,Sydney,2024-01-10
+2,Bob,21,Melbourne,2024-02-15
+3,Cindy,19,Sydney,2024-03-01
+4,David,22,Brisbane,2024-03-20
+5,Eva,,Sydney,2024-04-01
+6,Frank,35,Melbourne,2024-04-15
+7,Grace,120,Sydney,2024-05-01

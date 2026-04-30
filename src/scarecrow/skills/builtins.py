@@ -3,6 +3,7 @@ from pathlib import Path
 BUILTIN_RUN_PYTHON_SKILL = """---
 name: run-python
 description: 当用户需要查看、加载、分析、统计、清洗数据时使用
+capabilities: python.execute, data.analyze, data.aggregate, data.clean, data.transform
 ---
 
 # run-python
@@ -84,6 +85,7 @@ print(df.describe(include="all").T.to_string())
 BUILTIN_DATA_EXPLORER_SKILL = """---
 name: data-explorer
 description: 系统化探查 DataFrame：形状、字段、类型、缺失值、数值分布、类别基数。当用户说“看看这份数据”、“分析一下”、“探索”、“了解一下数据”、“数据长什么样”时使用
+capabilities: data.explore, data.profile, data.missing_analysis
 ---
 
 # data-explorer

@@ -32,6 +32,7 @@ from scarecrow.runtime import (
     prepare_agent_for_message,
     route_user_input,
     stream_agent_response,
+    inspect_capability_selection,
 )
 from scarecrow.skills import ensure_builtin_skills
 from scarecrow.tools import reset_namespace
@@ -102,8 +103,13 @@ def start_repl(workspace: Path) -> None:
         if user_input == "/reset":
             state.reset()
             reset_namespace()
-            console.print("[dim]已清空对话历史与 Python 命名空间[/dim]")
+            console.print("[dim]已清空对话历史、任务状态与 Python 命名空间[/dim]")
             continue
+
+        if user_input == "/state":
+            console.print(state.task_state.brief(), markup=False)
+            continue
+
 
         if user_input.startswith("/route "):
             _debug_route(user_input.removeprefix("/route ").strip())
@@ -156,6 +162,10 @@ def _handle_chat(user_input: str, state: SessionState) -> None:
             console.print(f"[yellow]{policy_decision.message}[/yellow]")
         return
 
+    known_capabilities, unknown_capabilities, inspected_tools = (
+        inspect_capability_selection(decision)
+    )
+
     try:
         with console.status("初始化 Agent..."):
             _, selected_skills, selected_tools = prepare_agent_for_message(
@@ -170,20 +180,27 @@ def _handle_chat(user_input: str, state: SessionState) -> None:
     console.print(
         f"[dim]route={decision.intent}, "
         f"capabilities={decision.required_capabilities}, "
+        f"known={known_capabilities}, "
+        f"unknown={unknown_capabilities}, "
         f"skills={selected_skills}, "
         f"tools={selected_tools}, "
         f"confidence={decision.confidence:.2f}[/dim]"
     )
 
+    if inspected_tools != selected_tools:
+        console.print(
+            f"[yellow]Tool selection mismatch: "
+            f"inspected={inspected_tools}, selected={selected_tools}[/yellow]"
+        )
+
     try:
         printed_tool_calls: set[str] = set()
 
-        for msg in stream_agent_response(state, user_input):
+        for msg in stream_agent_response(cfg, state, user_input):
             _render_message(msg, printed_tool_calls)
 
     except Exception as e:
         console.print(f"[red]Agent 出错: {e}[/red]")
-
 
 def _render_tool_result(content: str) -> None:
     """渲染工具执行结果：错误显示关键行，成功输出显示前几行预览。"""
@@ -203,11 +220,13 @@ def _render_tool_result(content: str) -> None:
 
     if is_error:
         last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
-        console.print(f"[red]✗[/red] [dim]{_truncate(last, 120)}[/dim]")
+        console.print("[red]✗[/red]", end=" ")
+        console.print(_truncate(last, 120), style="dim", markup=False)
         return
 
     if size <= 200 and len(lines) <= 1:
-        console.print(f"[green]✓[/green] [dim]{content.strip()}[/dim]")
+        console.print("[green]✓[/green]", end=" ")
+        console.print(content.strip(), style="dim", markup=False)
         return
 
     preview_lines = lines[:5]
@@ -287,7 +306,8 @@ def _show_help() -> None:
     console.print("  /help        显示帮助")
     console.print("  /config      配置 LLM")
     console.print("  /langsmith   配置 LangSmith 追踪（可选）")
-    console.print("  /reset       清空对话历史与 Python 命名空间")
+    console.print("  /reset       清空对话历史、任务状态与 Python 命名空间")
+    console.print("  /state       查看当前任务状态")
     console.print("  /route 文本  调试 Intent Router")
     console.print("  /quit        退出")
     console.print("  其他输入会发送给 Agent")

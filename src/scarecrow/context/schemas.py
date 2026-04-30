@@ -13,3 +13,5 @@ class ContextBuildInput(BaseModel):
     include_skill_index: bool = False
 
     include_all_skills: bool = True
+
+    task_state_brief: str | None = None

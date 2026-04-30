@@ -1,3 +1,5 @@
+# src/scarecrow/skills/parser.py
+
 from pathlib import Path
 
 from scarecrow.skills.schemas import SkillDocument, SkillMetadata, SkillSource
@@ -11,10 +13,12 @@ def parse_skill_file(path: Path, source: SkillSource = "user") -> SkillDocument 
     ---
     name: data-explorer
     description: 系统化探查 DataFrame
+    capabilities: data.explore, data.profile
     ---
 
-    # data-explorer
-    ...
+    注意：
+    - capabilities 是可选字段
+    - 没有 frontmatter 时，使用目录名作为 skill name
     """
 
     try:
@@ -25,14 +29,16 @@ def parse_skill_file(path: Path, source: SkillSource = "user") -> SkillDocument 
     if not raw:
         return None
 
-    frontmatter, body = _split_frontmatter(raw)
+    frontmatter, _ = _split_frontmatter(raw)
 
     name = frontmatter.get("name") or path.parent.name
     description = frontmatter.get("description", "")
+    capabilities = _parse_capabilities(frontmatter.get("capabilities", ""))
 
     metadata = SkillMetadata(
         name=name.strip(),
         description=description.strip(),
+        capabilities=capabilities,
         path=path,
         source=source,
         enabled=True,
@@ -47,8 +53,11 @@ def parse_skill_file(path: Path, source: SkillSource = "user") -> SkillDocument 
 def _split_frontmatter(raw: str) -> tuple[dict[str, str], str]:
     """解析最小 YAML-like frontmatter。
 
-    为了避免现在引入 pyyaml，先只支持 key: value。
-    后面 skill schema 复杂后再换成 yaml.safe_load。
+    当前只支持简单 key: value。
+    例如：
+    name: xxx
+    description: xxx
+    capabilities: a, b, c
     """
 
     if not raw.startswith("---"):
@@ -72,8 +81,10 @@ def _split_frontmatter(raw: str) -> tuple[dict[str, str], str]:
 
     for line in fm_lines:
         line = line.strip()
+
         if not line or line.startswith("#"):
             continue
+
         if ":" not in line:
             continue
 
@@ -81,3 +92,20 @@ def _split_frontmatter(raw: str) -> tuple[dict[str, str], str]:
         data[key.strip()] = value.strip().strip('"').strip("'")
 
     return data, body
+
+
+def _parse_capabilities(raw: str) -> list[str]:
+    """解析 capabilities 字段。
+
+    当前支持：
+    capabilities: data.explore, data.profile
+
+    也兼容空值：
+    capabilities:
+    """
+
+    if not raw:
+        return []
+
+    items = [item.strip() for item in raw.split(",")]
+    return [item for item in items if item]
