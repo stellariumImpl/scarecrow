@@ -86,23 +86,36 @@ def select_tools_from_decision(decision: RouteDecision) -> list[str]:
 
 def inspect_capability_selection(
     decision: RouteDecision,
-) -> tuple[list[str], list[str], list[str]]:
-    """返回能力选择诊断信息。
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """返回 capability 诊断信息。
 
     返回：
-    - known_capabilities
-    - unknown_capabilities
-    - selected_tools
+    - known_capabilities: Tool 或 Skill 支持的能力
+    - unknown_capabilities: Tool 和 Skill 都不支持的能力
+    - selected_tools: 根据 Tool capability 选出的工具
+    - selected_skills: 根据 Skill capability 选出的技能
     """
 
     tool_registry = build_default_tool_registry()
+    skill_registry = load_skill_registry(SKILLS_DIR)
 
-    known_capabilities, unknown_capabilities = tool_registry.validate_capabilities(
+    tool_known, _ = tool_registry.validate_capabilities(
+        decision.required_capabilities
+    )
+    skill_known, _ = skill_registry.validate_capabilities(
         decision.required_capabilities
     )
 
+    known_capabilities = list(dict.fromkeys(tool_known + skill_known))
+
+    unknown_capabilities = [
+        capability
+        for capability in decision.required_capabilities
+        if capability not in known_capabilities
+    ]
+
     selected_tools = tool_registry.select_tool_names_by_capabilities(
-        required_capabilities=known_capabilities,
+        required_capabilities=tool_known,
         max_risk=decision.risk_level,
     )
 
@@ -110,8 +123,20 @@ def inspect_capability_selection(
         if tool_name not in selected_tools:
             selected_tools.append(tool_name)
 
-    return known_capabilities, unknown_capabilities, selected_tools
+    selected_skills = skill_registry.select_skill_names_by_capabilities(
+        decision.required_capabilities
+    )
 
+    for skill_name in decision.required_skills:
+        if skill_name not in selected_skills:
+            selected_skills.append(skill_name)
+
+    return (
+        known_capabilities,
+        list(dict.fromkeys(unknown_capabilities)),
+        selected_tools,
+        selected_skills,
+    )
 
 def build_agent(
     cfg: LLMConfig,

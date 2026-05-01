@@ -29,6 +29,7 @@ from scarecrow.langsmith_setup import apply_langsmith_env
 from scarecrow.runtime import (
     SessionState,
     decide_runtime_policy,
+    decompose_user_input,
     prepare_agent_for_message,
     route_user_input,
     stream_agent_response,
@@ -114,6 +115,13 @@ def start_repl(workspace: Path) -> None:
         if user_input.startswith("/route "):
             _debug_route(user_input.removeprefix("/route ").strip())
             continue
+        
+        if user_input.startswith("/decompose "):
+            _debug_decompose(
+                user_input.removeprefix("/decompose ").strip(),
+                state,
+            )
+            continue
 
         _handle_chat(user_input, state)
 
@@ -139,6 +147,31 @@ def _debug_route(text: str) -> None:
 
     console.print_json(decision.model_dump_json(indent=2, ensure_ascii=False))
 
+def _debug_decompose(text: str, state: SessionState) -> None:
+    """调试 Task Decomposer。"""
+
+    if not text:
+        console.print("[yellow]用法: /decompose <用户请求>[/yellow]")
+        return
+
+    cfg = load_config()
+    if cfg is None:
+        console.print("[yellow]请先运行 /config 配置 LLM[/yellow]")
+        return
+
+    try:
+        with console.status("Decomposing..."):
+            result = decompose_user_input(
+                user_input=text,
+                cfg=cfg,
+                task_state_brief=state.task_state.brief(),
+            )
+    except Exception as e:
+        console.print("[red]Decomposer 出错:[/red]", end=" ")
+        console.print(str(e), markup=False)
+        return
+
+    console.print_json(result.model_dump_json(indent=2, ensure_ascii=False))
 
 def _handle_chat(user_input: str, state: SessionState) -> None:
     """处理一轮对话。"""
@@ -162,9 +195,12 @@ def _handle_chat(user_input: str, state: SessionState) -> None:
             console.print(f"[yellow]{policy_decision.message}[/yellow]")
         return
 
-    known_capabilities, unknown_capabilities, inspected_tools = (
-        inspect_capability_selection(decision)
-    )
+    (
+        known_capabilities,
+        unknown_capabilities,
+        inspected_tools,
+        inspected_skills,
+    ) = inspect_capability_selection(decision)
 
     try:
         with console.status("初始化 Agent..."):
@@ -191,6 +227,12 @@ def _handle_chat(user_input: str, state: SessionState) -> None:
         console.print(
             f"[yellow]Tool selection mismatch: "
             f"inspected={inspected_tools}, selected={selected_tools}[/yellow]"
+        )
+
+    if inspected_skills != selected_skills:
+        console.print(
+            f"[yellow]Skill selection mismatch: "
+            f"inspected={inspected_skills}, selected={selected_skills}[/yellow]"
         )
 
     try:
@@ -312,6 +354,7 @@ def _show_help() -> None:
     console.print("  /reset       清空对话历史、任务状态与 Python 命名空间")
     console.print("  /state       查看当前任务状态")
     console.print("  /route 文本  调试 Intent Router")
+    console.print("  /decompose 文本  调试多任务拆解")
     console.print("  /quit        退出")
     console.print("  其他输入会发送给 Agent")
 

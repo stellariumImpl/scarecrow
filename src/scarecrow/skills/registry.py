@@ -99,3 +99,27 @@ class SkillRegistry:
                 selected.append(meta.name)
 
         return selected
+
+    def validate_capabilities(
+        self,
+        capabilities: list[str],
+    ) -> tuple[list[str], list[str]]:
+        """校验 capability 是否被当前 enabled skills 支持。
+
+        返回：
+        - known: SkillRegistry 支持的能力
+        - unknown: SkillRegistry 不支持的能力
+        """
+
+        supported = self.supported_capabilities()
+
+        known: list[str] = []
+        unknown: list[str] = []
+
+        for capability in capabilities:
+            if capability in supported:
+                known.append(capability)
+            else:
+                unknown.append(capability)
+
+        return list(dict.fromkeys(known)), list(dict.fromkeys(unknown))
