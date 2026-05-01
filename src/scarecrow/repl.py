@@ -2,6 +2,7 @@
 
 """Scarecrow REPL - 交互式对话循环"""
 
+import json
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -27,13 +28,16 @@ from scarecrow.config import (
 )
 from scarecrow.langsmith_setup import apply_langsmith_env
 from scarecrow.runtime import (
+    PlanStep,
     SessionState,
+    TaskPlan,
     decide_runtime_policy,
     decompose_user_input,
+    inspect_capability_selection,
+    plan_user_input,
     prepare_agent_for_message,
     route_user_input,
     stream_agent_response,
-    inspect_capability_selection,
 )
 from scarecrow.skills import ensure_builtin_skills
 from scarecrow.tools import reset_namespace
@@ -43,7 +47,7 @@ console = Console()
 
 
 class _Cancelled(Exception):
-    """用户取消配置流程"""
+    """用户取消配置流程。"""
 
 
 def start_repl(workspace: Path) -> None:
@@ -111,11 +115,24 @@ def start_repl(workspace: Path) -> None:
             console.print(state.task_state.brief(), markup=False)
             continue
 
+        if user_input == "/plan-mode":
+            _show_plan_mode(state)
+            continue
+
+        if user_input == "/plan-mode on":
+            state.plan_mode = True
+            console.print("[green]✓ Plan Mode 已开启[/green]")
+            continue
+
+        if user_input == "/plan-mode off":
+            state.plan_mode = False
+            console.print("[green]✓ Plan Mode 已关闭[/green]")
+            continue
 
         if user_input.startswith("/route "):
             _debug_route(user_input.removeprefix("/route ").strip())
             continue
-        
+
         if user_input.startswith("/decompose "):
             _debug_decompose(
                 user_input.removeprefix("/decompose ").strip(),
@@ -123,7 +140,19 @@ def start_repl(workspace: Path) -> None:
             )
             continue
 
+        if user_input.startswith("/plan "):
+            _debug_plan(
+                user_input.removeprefix("/plan ").strip(),
+                state,
+            )
+            continue
+
         _handle_chat(user_input, state)
+
+
+# ---------------------------------------------------------------------------
+# Debug commands
+# ---------------------------------------------------------------------------
 
 
 def _debug_route(text: str) -> None:
@@ -142,10 +171,12 @@ def _debug_route(text: str) -> None:
         with console.status("Routing..."):
             decision = route_user_input(text, cfg)
     except Exception as e:
-        console.print(f"[red]Router 出错: {e}[/red]")
+        console.print("[red]Router 出错:[/red]", end=" ")
+        console.print(str(e), markup=False)
         return
 
-    console.print_json(decision.model_dump_json(indent=2, ensure_ascii=False))
+    _print_json(decision.model_dump(mode="json"))
+
 
 def _debug_decompose(text: str, state: SessionState) -> None:
     """调试 Task Decomposer。"""
@@ -171,10 +202,15 @@ def _debug_decompose(text: str, state: SessionState) -> None:
         console.print(str(e), markup=False)
         return
 
-    console.print_json(result.model_dump_json(indent=2, ensure_ascii=False))
+    _print_json(result.model_dump(mode="json"))
 
-def _handle_chat(user_input: str, state: SessionState) -> None:
-    """处理一轮对话。"""
+
+def _debug_plan(text: str, state: SessionState) -> None:
+    """调试 Task Planner。"""
+
+    if not text:
+        console.print("[yellow]用法: /plan <用户请求>[/yellow]")
+        return
 
     cfg = load_config()
     if cfg is None:
@@ -182,25 +218,240 @@ def _handle_chat(user_input: str, state: SessionState) -> None:
         return
 
     try:
-        with console.status("Routing..."):
-            decision = route_user_input(user_input, cfg)
+        with console.status("Planning..."):
+            plan = plan_user_input(
+                user_input=text,
+                cfg=cfg,
+                task_state_brief=state.task_state.brief(),
+            )
     except Exception as e:
-        console.print(f"[red]Router 出错: {e}[/red]")
+        console.print("[red]Planner 出错:[/red]", end=" ")
+        console.print(str(e), markup=False)
         return
+
+    _print_json(plan.model_dump(mode="json"))
+
+
+def _show_plan_mode(state: SessionState) -> None:
+    """显示当前 Plan Mode 状态。"""
+
+    status = "on" if state.plan_mode else "off"
+    console.print(f"[cyan]Plan Mode: {status}[/cyan]")
+
+
+def _print_json(data: dict) -> None:
+    """安全打印 JSON。"""
+
+    console.print_json(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Chat execution
+# ---------------------------------------------------------------------------
+
+
+def _handle_chat(user_input: str, state: SessionState) -> None:
+    """处理一轮用户输入。
+
+    Plan Mode OFF:
+        走现有 decomposer + single task 执行链路。
+
+    Plan Mode ON:
+        走 Task Planner + PlanStep 顺序执行链路。
+    """
+
+    cfg = load_config()
+    if cfg is None:
+        console.print("[yellow]请先运行 /config 配置 LLM[/yellow]")
+        return
+
+    if state.plan_mode:
+        _handle_planned_chat(user_input, state, cfg)
+        return
+
+    _handle_decomposed_chat(user_input, state, cfg)
+
+
+def _handle_decomposed_chat(
+    user_input: str,
+    state: SessionState,
+    cfg: LLMConfig,
+) -> None:
+    """Plan Mode OFF 时的默认执行路径。
+
+    保持现有行为：
+    - 单任务直接执行
+    - 显式多任务按 Decomposer 拆分后顺序执行
+    """
+
+    try:
+        with console.status("Decomposing..."):
+            decomposition = decompose_user_input(
+                user_input=user_input,
+                cfg=cfg,
+                task_state_brief=state.task_state.brief(),
+            )
+    except Exception as e:
+        console.print("[red]Decomposer 出错:[/red]", end=" ")
+        console.print(str(e), markup=False)
+        return
+
+    if not decomposition.is_multi_task:
+        _handle_single_chat(user_input, state, cfg=cfg)
+        return
+
+    console.print()
+    console.print(
+        f"检测到多任务，拆分为 {len(decomposition.tasks)} 个子任务：",
+        style="bold cyan",
+    )
+
+    for i, task in enumerate(decomposition.tasks, start=1):
+        console.print(f"{i}. {task.text}", style="cyan", markup=False)
+
+    for i, task in enumerate(decomposition.tasks, start=1):
+        console.print()
+        console.print(
+            f"子任务 {i}/{len(decomposition.tasks)}",
+            style="bold cyan",
+        )
+        console.print(task.text, style="cyan", markup=False)
+
+        ok = _handle_single_chat(task.text, state, cfg=cfg)
+
+        if not ok:
+            console.print(
+                f"子任务 {i} 执行失败，已停止后续子任务。",
+                style="yellow",
+            )
+            return
+
+    console.print()
+    console.print("✓ 多任务执行完成", style="green")
+
+
+def _handle_planned_chat(
+    user_input: str,
+    state: SessionState,
+    cfg: LLMConfig,
+) -> None:
+    """Plan Mode ON 时的执行路径。"""
+
+    try:
+        with console.status("Planning..."):
+            plan = plan_user_input(
+                user_input=user_input,
+                cfg=cfg,
+                task_state_brief=state.task_state.brief(),
+            )
+    except Exception as e:
+        console.print("[red]Planner 出错:[/red]", end=" ")
+        console.print(str(e), markup=False)
+        return
+
+    _render_plan_summary(plan)
+
+    if plan.requires_confirmation:
+        console.print("[yellow]该计划需要确认后才能执行。[/yellow]")
+        return
+
+    if not plan.steps:
+        console.print("[yellow]Planner 没有生成可执行步骤。[/yellow]")
+        return
+
+    for index, step in enumerate(plan.steps, start=1):
+        console.print()
+        console.print(
+            f"计划步骤 {index}/{len(plan.steps)}: {step.id}",
+            style="bold cyan",
+        )
+        console.print(step.instruction, style="cyan", markup=False)
+
+        if step.requires_user_input:
+            question = step.user_question or "该步骤需要补充信息后才能执行。"
+            console.print("[yellow]需要用户补充信息：[/yellow]", end=" ")
+            console.print(question, markup=False)
+            return
+
+        step_input = build_step_execution_input(step)
+        ok = _handle_single_chat(
+            step_input,
+            state,
+            cfg=cfg,
+            isolated_messages=True,
+        )
+
+        if not ok:
+            console.print(
+                f"计划步骤 {index} 执行失败，已停止后续步骤。",
+                style="yellow",
+            )
+            return
+
+    console.print()
+    console.print("✓ Plan 执行完成", style="green")
+
+
+def _handle_single_chat(
+    user_input: str,
+    state: SessionState,
+    cfg: LLMConfig | None = None,
+    isolated_messages: bool = False,
+) -> bool:
+    """处理单个任务。
+
+    返回：
+    - True：执行成功
+    - False：执行失败或被 policy 拦截
+    """
+
+    if cfg is None:
+        cfg = load_config()
+
+    if cfg is None:
+        console.print("[yellow]请先运行 /config 配置 LLM[/yellow]")
+        return False
+
+    try:
+        with console.status("Routing..."):
+            decision = route_user_input(
+                user_input=user_input,
+                cfg=cfg,
+                task_state_brief=state.task_state.brief(),
+            )
+    except TypeError:
+        # 兼容旧版本 route_user_input(user_input, cfg)。
+        try:
+            with console.status("Routing..."):
+                decision = route_user_input(user_input, cfg)
+        except Exception as e:
+            console.print("[red]Router 出错:[/red]", end=" ")
+            console.print(str(e), markup=False)
+            return False
+    except Exception as e:
+        console.print("[red]Router 出错:[/red]", end=" ")
+        console.print(str(e), markup=False)
+        return False
 
     policy_decision = decide_runtime_policy(decision)
 
     if policy_decision.action == "show_message":
         if policy_decision.message:
             console.print(f"[yellow]{policy_decision.message}[/yellow]")
-        return
+        return False
 
-    (
-        known_capabilities,
-        unknown_capabilities,
-        inspected_tools,
-        inspected_skills,
-    ) = inspect_capability_selection(decision)
+    try:
+        (
+            known_capabilities,
+            unknown_capabilities,
+            inspected_tools,
+            inspected_skills,
+        ) = inspect_capability_selection(decision)
+    except ValueError:
+        known_capabilities, unknown_capabilities, inspected_tools = (
+            inspect_capability_selection(decision)
+        )
+        inspected_skills = []
 
     try:
         with console.status("初始化 Agent..."):
@@ -210,8 +461,9 @@ def _handle_chat(user_input: str, state: SessionState) -> None:
                 decision=decision,
             )
     except Exception as e:
-        console.print(f"[red]Agent 初始化失败: {e}[/red]")
-        return
+        console.print("[red]Agent 初始化失败:[/red]", end=" ")
+        console.print(str(e), markup=False)
+        return False
 
     console.print(
         f"[dim]route={decision.intent}, "
@@ -229,7 +481,7 @@ def _handle_chat(user_input: str, state: SessionState) -> None:
             f"inspected={inspected_tools}, selected={selected_tools}[/yellow]"
         )
 
-    if inspected_skills != selected_skills:
+    if inspected_skills and inspected_skills != selected_skills:
         console.print(
             f"[yellow]Skill selection mismatch: "
             f"inspected={inspected_skills}, selected={selected_skills}[/yellow]"
@@ -238,11 +490,93 @@ def _handle_chat(user_input: str, state: SessionState) -> None:
     try:
         printed_tool_calls: set[str] = set()
 
-        for msg in stream_agent_response(cfg, state, user_input):
+        for msg in stream_agent_response(
+            cfg,
+            state,
+            user_input,
+            isolated_messages=isolated_messages,
+        ):
             _render_message(msg, printed_tool_calls)
 
     except Exception as e:
-        console.print(f"[red]Agent 出错: {e}[/red]")
+        console.print("[red]Agent 出错:[/red]", end=" ")
+        console.print(str(e), markup=False)
+        return False
+
+    return True
+
+# ---------------------------------------------------------------------------
+# Plan rendering / execution input
+# ---------------------------------------------------------------------------
+
+
+def _render_plan_summary(plan: TaskPlan) -> None:
+    """渲染计划摘要。"""
+
+    console.print()
+    console.print(
+        f"Plan Mode: {plan.mode} | {plan.interpretation} | {plan.target_scope}",
+        style="bold cyan",
+    )
+
+    if plan.objective:
+        console.print(f"目标: {plan.objective}", style="cyan", markup=False)
+
+    console.print(f"步骤数: {len(plan.steps)}", style="cyan")
+
+    for index, step in enumerate(plan.steps, start=1):
+        marker = "?" if step.requires_user_input else "✓"
+        console.print(
+            f"{index}. [{marker}] {step.instruction}",
+            style="cyan",
+            markup=False,
+        )
+
+
+def build_step_execution_input(step: PlanStep) -> str:
+    """把 PlanStep 转成可交给 Router/Agent 的单步请求。"""
+
+    input_lines: list[str] = []
+
+    for item in step.inputs:
+        ref = item.ref or "(无引用)"
+        role = f"\n  用途：{item.role}" if item.role else ""
+        input_lines.append(f"- {item.kind}: {ref}{role}")
+
+    expected_lines = [f"- {item}" for item in step.expected_outputs]
+
+    inputs_block = "\n".join(input_lines) if input_lines else "无显式输入引用。"
+    expected_block = "\n".join(expected_lines) if expected_lines else "完成该步骤。"
+
+    return f"""当前计划步骤：{step.id}
+
+任务：
+{step.instruction}
+
+目的：
+{step.purpose or "完成该计划步骤。"}
+
+本步骤输入引用：
+{inputs_block}
+
+期望产出：
+{expected_block}
+
+执行要求：
+- 只完成当前计划步骤，不要跳到后续步骤。
+- 如果本步骤需要查看文件内容、预览数据、统计数据或验证数据，必须调用合适工具完成。
+- 不要仅凭历史对话、当前任务状态或记忆声称已经完成预览、统计、分析或检查。
+- 当前任务状态只能作为上下文线索，不等同于本步骤的工具结果。
+- 如果本步骤需要预览文件，回答中必须基于本步骤实际工具返回的内容。
+- 不要在步骤完成后询问“是否需要继续”，后续步骤由 Runtime 控制。
+
+请完成这个计划步骤。"""
+
+
+# ---------------------------------------------------------------------------
+# Tool call rendering
+# ---------------------------------------------------------------------------
+
 
 def _render_tool_result(content: str) -> None:
     """渲染工具执行结果：错误显示关键行，成功输出显示前几行预览。"""
@@ -284,27 +618,21 @@ def _render_tool_result(content: str) -> None:
             markup=False,
         )
 
-def _truncate(s: str, max_len: int) -> str:
-    """单行截断：超过 max_len 用 ... 收尾。"""
-
-    if len(s) <= max_len:
-        return s
-
-    return s[: max_len - 3] + "..."
-
 
 def _render_message(msg, printed_tool_calls: set) -> None:
-    """根据消息类型渲染：tool call / tool result / 最终回答。"""
+    """根据消息类型渲染 tool call、tool result、最终回答。"""
 
     if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-        for tc in msg.tool_calls:
-            tc_id = tc.get("id", "")
-            if tc_id in printed_tool_calls:
+        for tool_call in msg.tool_calls:
+            tool_call_id = tool_call.get("id", "")
+
+            if tool_call_id in printed_tool_calls:
                 continue
 
-            printed_tool_calls.add(tc_id)
-            name = tc.get("name", "?")
-            args = tc.get("args", {}) or {}
+            printed_tool_calls.add(tool_call_id)
+
+            name = tool_call.get("name", "?")
+            args = tool_call.get("args", {}) or {}
 
             console.print(f"\n[cyan]⚙ {name}[/cyan]")
             _print_tool_args(args)
@@ -337,26 +665,51 @@ def _print_tool_args(args: dict) -> None:
         console.print(f"  {first_line}{more}", style="dim", markup=False)
         return
 
-    for k, v in args.items():
-        v_str = str(v)
-        if len(v_str) > 60:
-            v_str = v_str[:60] + "..."
-        console.print(f"  {k}={v_str}", style="dim", markup=False)
+    for key, value in args.items():
+        value_text = str(value)
+
+        if len(value_text) > 60:
+            value_text = value_text[:60] + "..."
+
+        console.print(f"  {key}={value_text}", style="dim", markup=False)
+
+
+def _truncate(text: str, max_len: int) -> str:
+    """单行截断，超过 max_len 用 ... 收尾。"""
+
+    if len(text) <= max_len:
+        return text
+
+    return text[: max_len - 3] + "..."
+
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
 
 
 def _show_help() -> None:
     """显示 REPL 帮助信息。"""
 
     console.print("[bold]可用命令：[/bold]")
-    console.print("  /help        显示帮助")
-    console.print("  /config      配置 LLM")
-    console.print("  /langsmith   配置 LangSmith 追踪（可选）")
-    console.print("  /reset       清空对话历史、任务状态与 Python 命名空间")
-    console.print("  /state       查看当前任务状态")
-    console.print("  /route 文本  调试 Intent Router")
+    console.print("  /help            显示帮助")
+    console.print("  /config          配置 LLM")
+    console.print("  /langsmith       配置 LangSmith 追踪（可选）")
+    console.print("  /reset           清空对话历史、任务状态与 Python 命名空间")
+    console.print("  /state           查看当前任务状态")
+    console.print("  /route 文本      调试 Intent Router")
     console.print("  /decompose 文本  调试多任务拆解")
-    console.print("  /quit        退出")
+    console.print("  /plan 文本       调试任务规划")
+    console.print("  /plan-mode       查看 Plan Mode 状态")
+    console.print("  /plan-mode on    开启 Plan Mode")
+    console.print("  /plan-mode off   关闭 Plan Mode")
+    console.print("  /quit            退出")
     console.print("  其他输入会发送给 Agent")
+
+
+# ---------------------------------------------------------------------------
+# /config
+# ---------------------------------------------------------------------------
 
 
 def _do_config(session: PromptSession) -> None:
@@ -365,11 +718,13 @@ def _do_config(session: PromptSession) -> None:
     current = load_config()
 
     console.print("[bold cyan]LLM 配置[/bold cyan]")
+
     if current:
         console.print(
             f"[dim]当前: {PROVIDER_LABELS[current.provider]} · "
             f"{current.model} · {current.masked_key()}[/dim]"
         )
+
     console.print("[dim]随时按 Ctrl+C 取消[/dim]")
 
     try:
@@ -390,6 +745,11 @@ def _do_config(session: PromptSession) -> None:
         f"{config.masked_key()}"
     )
     console.print(f"[dim]配置文件: {CONFIG_FILE}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# /langsmith
+# ---------------------------------------------------------------------------
 
 
 def _do_langsmith(session: PromptSession) -> None:
@@ -488,13 +848,21 @@ def _langsmith_set(session: PromptSession, current) -> None:
     if not project:
         project = default_project
 
-    save_langsmith_config(LangSmithConfig(api_key=key, project=project, enabled=True))
+    save_langsmith_config(
+        LangSmithConfig(api_key=key, project=project, enabled=True)
+    )
 
     masked_new = f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "*" * len(key)
+
     console.print(
         f"\n[green]✓ 已保存[/green] LangSmith · "
         f"project={project} · {masked_new}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Provider / Model / Key prompts
+# ---------------------------------------------------------------------------
 
 
 def _pick_provider(session: PromptSession, current) -> str:
@@ -503,19 +871,22 @@ def _pick_provider(session: PromptSession, current) -> str:
     providers = list(PROVIDER_MODELS.keys())
 
     console.print("\n[bold]选择 Provider:[/bold]")
-    for i, p in enumerate(providers, start=1):
-        console.print(f"  [cyan]{i}.[/cyan] {PROVIDER_LABELS[p]}")
 
-    default_idx = None
+    for index, provider in enumerate(providers, start=1):
+        console.print(f"  [cyan]{index}.[/cyan] {PROVIDER_LABELS[provider]}")
+
+    default_index = None
+
     if current:
-        for i, p in enumerate(providers):
-            if p == current.provider:
-                default_idx = i + 1
+        for index, provider in enumerate(providers, start=1):
+            if provider == current.provider:
+                default_index = index
                 break
 
     hint = f"数字 (1-{len(providers)})"
-    if default_idx:
-        hint += f"，默认 {default_idx}"
+
+    if default_index:
+        hint += f"，默认 {default_index}"
 
     while True:
         try:
@@ -523,8 +894,8 @@ def _pick_provider(session: PromptSession, current) -> str:
         except (KeyboardInterrupt, EOFError):
             raise _Cancelled()
 
-        if not raw and default_idx:
-            return providers[default_idx - 1]
+        if not raw and default_index:
+            return providers[default_index - 1]
 
         if raw.isdigit() and 1 <= int(raw) <= len(providers):
             return providers[int(raw) - 1]
@@ -537,34 +908,25 @@ def _pick_model(session: PromptSession, provider: str, current) -> str:
 
     models = PROVIDER_MODELS.get(provider, [])
 
-    if not models:
-        try:
-            model = session.prompt(
-                HTML("<ansigreen>模型名称 › </ansigreen>")
-            ).strip()
-        except (KeyboardInterrupt, EOFError):
-            raise _Cancelled()
+    console.print(f"\n[bold]选择 Model ({PROVIDER_LABELS[provider]}):[/bold]")
 
-        if not model:
-            raise _Cancelled()
+    for index, model in enumerate(models, start=1):
+        console.print(f"  [cyan]{index}.[/cyan] {model}")
 
-        return model
+    console.print("  [cyan]c.[/cyan] 自定义模型名")
 
-    console.print(f"\n[bold]选择 {PROVIDER_LABELS[provider]} 模型:[/bold]")
-    for i, m in enumerate(models, start=1):
-        console.print(f"  [cyan]{i}.[/cyan] {m}")
-    console.print(f"  [cyan]{len(models) + 1}.[/cyan] [dim]自定义（手动输入）[/dim]")
+    default_index = None
 
-    default_idx = None
     if current and current.provider == provider:
-        for i, m in enumerate(models):
-            if m == current.model:
-                default_idx = i + 1
+        for index, model in enumerate(models, start=1):
+            if model == current.model:
+                default_index = index
                 break
 
-    hint = f"数字 (1-{len(models) + 1})"
-    if default_idx:
-        hint += f"，默认 {default_idx}"
+    hint = f"数字 (1-{len(models)}) 或 c"
+
+    if default_index:
+        hint += f"，默认 {default_index}"
 
     while True:
         try:
@@ -572,28 +934,22 @@ def _pick_model(session: PromptSession, provider: str, current) -> str:
         except (KeyboardInterrupt, EOFError):
             raise _Cancelled()
 
-        if not raw and default_idx:
-            return models[default_idx - 1]
+        if not raw and default_index:
+            return models[default_index - 1]
 
-        if raw.isdigit():
-            idx = int(raw)
+        if raw.lower() == "c":
+            model = session.prompt(
+                HTML("<ansigreen>模型名 › </ansigreen>")
+            ).strip()
 
-            if 1 <= idx <= len(models):
-                return models[idx - 1]
+            if model:
+                return model
 
-            if idx == len(models) + 1:
-                try:
-                    custom = session.prompt(
-                        HTML("<ansigreen>自定义模型 › </ansigreen>")
-                    ).strip()
-                except (KeyboardInterrupt, EOFError):
-                    raise _Cancelled()
+            console.print("[red]模型名不可空白[/red]")
+            continue
 
-                if custom:
-                    return custom
-
-                console.print("[red]模型名称不可空白[/red]")
-                continue
+        if raw.isdigit() and 1 <= int(raw) <= len(models):
+            return models[int(raw) - 1]
 
         console.print(f"[red]请输入 {hint}[/red]")
 
@@ -603,38 +959,38 @@ def _input_api_key(session: PromptSession, provider: str, current) -> str:
 
     from prompt_toolkit import prompt as pt_prompt
 
-    label = PROVIDER_LABELS.get(provider, provider)
-    existing = None
+    existing_key = (
+        current.api_key
+        if current and current.provider == provider and current.api_key
+        else ""
+    )
 
-    if current and current.provider == provider:
-        existing = current.api_key
-
-    if existing:
+    if existing_key:
         masked = (
-            f"{existing[:4]}...{existing[-4:]}"
-            if len(existing) > 8
-            else "*" * len(existing)
+            f"{existing_key[:4]}...{existing_key[-4:]}"
+            if len(existing_key) > 8
+            else "*" * len(existing_key)
         )
         console.print(
-            f"\n[bold]输入 {label} API Key[/bold] "
-            f"[dim](Enter 保留当前: {masked})[/dim]"
+            f"\n[bold]API Key[/bold] "
+            f"[dim](Enter 保留: {masked})[/dim]"
         )
     else:
-        console.print(f"\n[bold]输入 {label} API Key[/bold]")
+        console.print("\n[bold]API Key[/bold]")
 
-    try:
-        key = pt_prompt(
-            HTML("<ansigreen>› </ansigreen>"),
-            is_password=True,
-        ).strip()
-    except (KeyboardInterrupt, EOFError):
-        raise _Cancelled()
+    while True:
+        try:
+            key = pt_prompt(
+                HTML("<ansigreen>› </ansigreen>"),
+                is_password=True,
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            raise _Cancelled()
 
-    if not key and existing:
-        return existing
+        if not key and existing_key:
+            return existing_key
 
-    if not key:
+        if key:
+            return key
+
         console.print("[red]API Key 不可空白[/red]")
-        raise _Cancelled()
-
-    return key

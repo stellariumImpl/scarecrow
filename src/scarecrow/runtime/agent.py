@@ -198,8 +198,17 @@ def stream_agent_response(
     cfg: LLMConfig,
     state: SessionState,
     user_input: str,
+    isolated_messages: bool = False,
 ) -> Iterator[Any]:
     """向当前 agent 发送用户输入，并流式返回新增消息。
+
+    参数：
+    - isolated_messages=False:
+      普通对话模式。使用并更新 state.messages。
+
+    - isolated_messages=True:
+      Plan step 隔离模式。只用当前 step input 执行，不复用完整历史 messages。
+      但 Observation 仍然会写入 state.task_state。
 
     这个函数只负责执行，不负责渲染。
     同一轮中会检测重复 tool call，避免 Agent 陷入无意义循环。
@@ -209,15 +218,21 @@ def stream_agent_response(
     if state.agent is None:
         raise RuntimeError("Agent is not initialized.")
 
-    state.messages.append({"role": "user", "content": user_input})
+    user_message = {"role": "user", "content": user_input}
 
-    result_messages = list(state.messages)
+    if isolated_messages:
+        input_messages = [user_message]
+    else:
+        state.messages.append(user_message)
+        input_messages = state.messages
+
+    result_messages = list(input_messages)
     emitted_messages: list[Any] = []
     seen_tool_calls: set[str] = set()
 
     try:
         for chunk in state.agent.stream(
-            {"messages": state.messages},
+            {"messages": input_messages},
             stream_mode="values",
             config={"recursion_limit": 8},
         ):
@@ -225,11 +240,15 @@ def stream_agent_response(
 
             for msg in new_messages[len(result_messages):]:
                 duplicate = _is_duplicate_tool_call(msg, seen_tool_calls)
+
                 if duplicate:
                     warning = _build_duplicate_tool_warning(duplicate)
                     emitted_messages.append(warning)
                     yield warning
-                    state.messages = result_messages
+
+                    if not isolated_messages:
+                        state.messages = result_messages
+
                     return
 
                 emitted_messages.append(msg)
@@ -237,7 +256,8 @@ def stream_agent_response(
 
             result_messages = new_messages
 
-        state.messages = result_messages
+        if not isolated_messages:
+            state.messages = result_messages
 
         if emitted_messages:
             observation_model = load_chat_model_from_config(cfg)
@@ -248,10 +268,10 @@ def stream_agent_response(
             )
 
     except Exception:
-        if state.messages:
+        if not isolated_messages and state.messages:
             state.messages.pop()
-        raise
 
+        raise
 
 def _is_duplicate_tool_call(msg, seen_tool_calls: set[str]) -> str | None:
     """检测同一轮中是否重复调用同一个工具和同一组参数。"""
